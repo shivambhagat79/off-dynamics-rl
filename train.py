@@ -58,7 +58,7 @@ if __name__ == "__main__":
     parser.add_argument('--tar_env_interact_interval', help='interval of interacting with target env', default=10, type=int)
     parser.add_argument('--max_step', default=int(1e6), type=int)  # the maximum gradient step for off-dynamics rl learning
     parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
-    
+
     args = parser.parse_args()
 
     # we support different ways of specifying tasks, e.g., hopper-friction, hopper_friction, hopper_morph_torso_easy, hopper-morph-torso-easy
@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
     # determine referenced environment name
     ref_env_name = args.env + '-' + str(args.shift_level)
-    
+
     if domain == 'antmaze':
         src_env_name = args.env
         src_env_name_config = args.env
@@ -145,16 +145,16 @@ if __name__ == "__main__":
         tar_env.seed(args.seed)
         tar_eval_env = call_env[domain](tar_env_config)
         tar_eval_env.seed(args.seed + 100)
-    
+
     if args.mode not in [0,1,2,3]:
         raise NotImplementedError # cannot support other modes
-    
+
     policy_config_name = args.policy.lower()
 
     # load pre-defined hyperparameter config for training
     with open(f"{str(Path(__file__).parent.absolute())}/config/{domain}/{policy_config_name}/{src_env_name_config}.yaml", 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
-    
+
     if args.params is not None:
         override_params = json.loads(args.params)
         config.update(override_params)
@@ -163,7 +163,7 @@ if __name__ == "__main__":
     print("------------------------------------------------------------")
     print("Policy: {}, Env: {}, Seed: {}".format(args.policy, args.env, args.seed))
     print("------------------------------------------------------------")
-    
+
     # log path, we use logging with tensorboard
     if args.mode == 1:
         outdir = args.dir + '/' + args.policy + '/' + args.env + '-srcdatatype-' + args.srctype + '-' + str(args.shift_level) + '/r' + str(args.seed)
@@ -191,7 +191,7 @@ if __name__ == "__main__":
 
     # get necessary information from both domains
     state_dim = src_eval_env.observation_space.shape[0]
-    action_dim = src_eval_env.action_space.shape[0] 
+    action_dim = src_eval_env.action_space.shape[0]
     max_action = float(src_eval_env.action_space.high[0])
     min_action = -max_action
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,7 +216,7 @@ if __name__ == "__main__":
     })
 
     policy = call_algo(args.policy, config, args.mode, device)
-    
+
     ## write logs to record training parameters
     with open(outdir + 'log.txt','w') as f:
         f.write('\n Policy: {}; Env: {}, seed: {}'.format(args.policy, args.env, args.seed))
@@ -231,7 +231,7 @@ if __name__ == "__main__":
         src_replay_buffer.convert_D4RL(d4rl.qlearning_dataset(src_eval_env))
         if 'antmaze' in args.env:
             src_replay_buffer.reward -= 1.0
-    
+
     if args.mode == 2 or args.mode == 3:
         tar_dataset = call_tar_dataset(tar_env_name, shift_level, args.tartype)
         tar_replay_buffer.convert_D4RL(tar_dataset)
@@ -239,7 +239,7 @@ if __name__ == "__main__":
             tar_replay_buffer.reward -= 1.0
 
     eval_cnt = 0
-    
+
     eval_src_return = eval_policy(policy, src_eval_env, eval_cnt=eval_cnt)
     eval_tar_return = eval_policy(policy, tar_eval_env, eval_cnt=eval_cnt)
     eval_cnt += 1
@@ -260,7 +260,7 @@ if __name__ == "__main__":
                 policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
             ).clip(-max_action, max_action)
 
-            src_next_state, src_reward, src_done, _ = src_env.step(src_action) 
+            src_next_state, src_reward, src_done, _ = src_env.step(src_action)
             src_done_bool = float(src_done) if src_episode_timesteps < src_env._max_episode_steps else 0
 
             if 'antmaze' in args.env:
@@ -270,7 +270,7 @@ if __name__ == "__main__":
 
             src_state = src_next_state
             src_episode_reward += src_reward
-            
+
             # interaction with tar env
             if t % config['tar_env_interact_interval'] == 0:
                 tar_episode_timesteps += 1
@@ -288,8 +288,8 @@ if __name__ == "__main__":
                 tar_episode_reward += tar_reward
 
             policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
-            
-            if src_done: 
+
+            if src_done:
                 print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, src_episode_num+1, src_episode_timesteps, src_episode_reward))
                 writer.add_scalar('train/source return', src_episode_reward, global_step = t+1)
 
@@ -297,7 +297,7 @@ if __name__ == "__main__":
                 src_episode_reward = 0
                 src_episode_timesteps = 0
                 src_episode_num += 1
-            
+
             if tar_done:
                 print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, tar_episode_num+1, tar_episode_timesteps, tar_episode_reward))
                 writer.add_scalar('train/target return', tar_episode_reward, global_step = t+1)
@@ -329,7 +329,7 @@ if __name__ == "__main__":
         tar_episode_reward, tar_episode_timesteps, tar_episode_num = 0, 0, 0
 
         for t in range(int(config['max_step'])):
-            
+
             # interaction with tar env
             if t % config['tar_env_interact_interval'] == 0:
                 tar_episode_timesteps += 1
@@ -347,7 +347,7 @@ if __name__ == "__main__":
                 tar_episode_reward += tar_reward
 
             policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
-            
+
             if tar_done:
                 print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, tar_episode_num+1, tar_episode_timesteps, tar_episode_reward))
                 writer.add_scalar('train/target return', tar_episode_reward, global_step = t+1)
@@ -384,7 +384,7 @@ if __name__ == "__main__":
                 policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
             ).clip(-max_action, max_action)
 
-            src_next_state, src_reward, src_done, _ = src_env.step(src_action) 
+            src_next_state, src_reward, src_done, _ = src_env.step(src_action)
             src_done_bool = float(src_done) if src_episode_timesteps < src_env._max_episode_steps else 0
 
             if 'antmaze' in args.env:
@@ -396,8 +396,8 @@ if __name__ == "__main__":
             src_episode_reward += src_reward
 
             policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
-            
-            if src_done: 
+
+            if src_done:
                 print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, src_episode_num+1, src_episode_timesteps, src_episode_reward))
                 writer.add_scalar('train/source return', src_episode_reward, global_step = t+1)
 
@@ -430,9 +430,10 @@ if __name__ == "__main__":
                 writer.add_scalar('test/target return', tar_eval_return, global_step = t+1)
                 eval_normalized_score = get_normalized_score(tar_eval_return, ref_env_name)
                 writer.add_scalar('test/target normalized score', eval_normalized_score, global_step = t+1)
-                
+
                 eval_cnt += 1
 
                 if args.save_model:
                     policy.save('{}/models/model'.format(outdir))
     writer.close()
+    #test
