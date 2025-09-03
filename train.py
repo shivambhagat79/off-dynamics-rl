@@ -152,8 +152,14 @@ if __name__ == "__main__":
     policy_config_name = args.policy.lower()
 
     # load pre-defined hyperparameter config for training
-    with open(f"{str(Path(__file__).parent.absolute())}/config/{domain}/{policy_config_name}/{src_env_name_config}.yaml", 'r', encoding='utf-8') as f:
+    config_path = f"{str(Path(__file__).parent.absolute())}/config/{domain}/{policy_config_name}/{src_env_name_config}.yaml"
+    if not os.path.exists(config_path):
+         # Fallback for LIBERTY if specific config not present
+        config_path = f"{str(Path(__file__).parent.absolute())}/config/{domain}/{policy_config_name}/default.yaml"
+
+    with open(config_path, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
+
 
     if args.params is not None:
         override_params = json.loads(args.params)
@@ -178,8 +184,8 @@ if __name__ == "__main__":
         os.makedirs("{}/models".format(outdir))
 
     # seed all
-    src_env.action_space.seed(args.seed) if src_env is not None else None
-    tar_env.action_space.seed(args.seed) if tar_env is not None else None
+    if src_env is not None: src_env.action_space.seed(args.seed)
+    if tar_env is not None: tar_env.action_space.seed(args.seed)
     src_eval_env.action_space.seed(args.seed)
     tar_eval_env.action_space.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -217,9 +223,6 @@ if __name__ == "__main__":
 
     policy = call_algo(args.policy, config, args.mode, device)
 
-    if args.mode == 0 or args.mode == 1:
-        kmeans_state_novelty = utils.KMeansStateNovelty(state_dim)
-
     ## write logs to record training parameters
     with open(outdir + 'log.txt','w') as f:
         f.write('\n Policy: {}; Env: {}, seed: {}'.format(args.policy, args.env, args.seed))
@@ -247,24 +250,24 @@ if __name__ == "__main__":
     eval_tar_return = eval_policy(policy, tar_eval_env, eval_cnt=eval_cnt)
     eval_cnt += 1
 
+    # The initial state of the current target env episode, required for LIBERTY
+    current_episode_initial_state = None
+
     if args.mode == 0:
         # online-online learning
 
         src_state, src_done = src_env.reset(), False
         tar_state, tar_done = tar_env.reset(), False
+        current_episode_initial_state = tar_state # Initialize s_0
+
         src_episode_reward, src_episode_timesteps, src_episode_num = 0, 0, 0
         tar_episode_reward, tar_episode_timesteps, tar_episode_num = 0, 0, 0
-
-        total_novel_states = 0
-        tar_episode_novel_states = 0
-        tar_steps = 0
 
         for t in range(int(config['max_step'])):
             src_episode_timesteps += 1
 
-            # select action randomly or according to policy, if the policy is deterministic, add exploration noise akin to TD3 implementation
             src_action = (
-                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
+                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.1, size=action_dim)
             ).clip(-max_action, max_action)
 
             src_next_state, src_reward, src_done, _ = src_env.step(src_action)
@@ -280,16 +283,11 @@ if __name__ == "__main__":
 
             # interaction with tar env
             if t % config['tar_env_interact_interval'] == 0:
-                tar_steps += 1
                 tar_episode_timesteps += 1
                 tar_action = policy.select_action(np.array(tar_state), test=False)
 
                 tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
-                is_novel = kmeans_state_novelty.check_and_update(np.array(tar_next_state))
-                if is_novel:
-                    total_novel_states += 1
-                    tar_episode_novel_states += 1
-                tar_done_bool = float(tar_done) if tar_episode_timesteps < src_env._max_episode_steps else 0
+                tar_done_bool = float(tar_done) if tar_episode_timesteps < tar_env._max_episode_steps else 0
 
                 if 'antmaze' in args.env:
                     tar_reward -= 1.0
@@ -299,12 +297,10 @@ if __name__ == "__main__":
                 tar_state = tar_next_state
                 tar_episode_reward += tar_reward
 
-            policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
-            if (tar_steps % 200 == 0):
-                writer.add_scalar('novelty/total_novel_states', total_novel_states, global_step=tar_steps)
+            policy.train(src_replay_buffer, tar_replay_buffer, current_episode_initial_state, config['batch_size'], writer)
 
             if src_done:
-                print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, src_episode_num+1, src_episode_timesteps, src_episode_reward))
+                print(f"Total T: {t+1} Src Episode Num: {src_episode_num+1} Episode T: {src_episode_timesteps} Reward: {src_episode_reward:.3f}")
                 writer.add_scalar('train/source return', src_episode_reward, global_step = t+1)
 
                 src_state, src_done = src_env.reset(), False
@@ -313,15 +309,13 @@ if __name__ == "__main__":
                 src_episode_num += 1
 
             if tar_done:
-                print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, tar_episode_num+1, tar_episode_timesteps, tar_episode_reward))
+                print(f"Total T: {t+1} Tar Episode Num: {tar_episode_num+1} Episode T: {tar_episode_timesteps} Reward: {tar_episode_reward:.3f}")
                 writer.add_scalar('train/target return', tar_episode_reward, global_step = t+1)
-                # record normalized score
                 train_normalized_score = get_normalized_score(tar_episode_reward, ref_env_name)
                 writer.add_scalar('train/target normalized score', train_normalized_score, global_step = t+1)
-                writer.add_scalar('novelty/episode_novel_states', tar_episode_novel_states, global_step=tar_episode_num + 1)
-                tar_episode_novel_states = 0
 
                 tar_state, tar_done = tar_env.reset(), False
+                current_episode_initial_state = tar_state # Update s_0 for the new episode
                 tar_episode_reward = 0
                 tar_episode_timesteps = 0
                 tar_episode_num += 1
@@ -331,7 +325,6 @@ if __name__ == "__main__":
                 tar_eval_return = eval_policy(policy, tar_eval_env, eval_cnt=eval_cnt)
                 writer.add_scalar('test/source return', src_eval_return, global_step = t+1)
                 writer.add_scalar('test/target return', tar_eval_return, global_step = t+1)
-                # record normalized score
                 eval_normalized_score = get_normalized_score(tar_eval_return, ref_env_name)
                 writer.add_scalar('test/target normalized score', eval_normalized_score, global_step = t+1)
 
@@ -342,25 +335,18 @@ if __name__ == "__main__":
     elif args.mode == 1:
         # offline-online learning
         tar_state, tar_done = tar_env.reset(), False
+        current_episode_initial_state = tar_state # Initialize s_0
         tar_episode_reward, tar_episode_timesteps, tar_episode_num = 0, 0, 0
 
-        total_novel_states = 0
-        tar_episode_novel_states = 0
-        tar_steps = 0
 
         for t in range(int(config['max_step'])):
 
             # interaction with tar env
             if t % config['tar_env_interact_interval'] == 0:
-                tar_steps += 1
                 tar_episode_timesteps += 1
                 tar_action = policy.select_action(np.array(tar_state), test=False)
 
                 tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
-                is_novel = kmeans_state_novelty.check_and_update(np.array(tar_next_state))
-                if is_novel:
-                    total_novel_states += 1
-                    tar_episode_novel_states += 1
                 tar_done_bool = float(tar_done) if tar_episode_timesteps < src_eval_env._max_episode_steps else 0
 
                 if 'antmaze' in args.env:
@@ -371,19 +357,16 @@ if __name__ == "__main__":
                 tar_state = tar_next_state
                 tar_episode_reward += tar_reward
 
-            policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
-            if (tar_steps % 200 == 0):
-                writer.add_scalar('novelty/total_novel_states', total_novel_states, global_step=tar_steps)
+            policy.train(src_replay_buffer, tar_replay_buffer, current_episode_initial_state, config['batch_size'], writer)
 
             if tar_done:
-                print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, tar_episode_num+1, tar_episode_timesteps, tar_episode_reward))
+                print(f"Total T: {t+1} Tar Episode Num: {tar_episode_num+1} Episode T: {tar_episode_timesteps} Reward: {tar_episode_reward:.3f}")
                 writer.add_scalar('train/target return', tar_episode_reward, global_step = t+1)
                 train_normalized_score = get_normalized_score(tar_episode_reward, ref_env_name)
                 writer.add_scalar('train/target normalized score', train_normalized_score, global_step = t+1)
-                writer.add_scalar('novelty/episode_novel_states', tar_episode_novel_states, global_step=tar_episode_num + 1)
-                tar_episode_novel_states = 0
 
                 tar_state, tar_done = tar_env.reset(), False
+                current_episode_initial_state = tar_state # Update s_0 for the new episode
                 tar_episode_reward = 0
                 tar_episode_timesteps = 0
                 tar_episode_num += 1
@@ -402,15 +385,15 @@ if __name__ == "__main__":
                     policy.save('{}/models/model'.format(outdir))
     elif args.mode == 2:
         # online-offline learning
+        # NOTE: LIBERTY exploration is not applicable here as there is no online interaction with the target env
         src_state, src_done = src_env.reset(), False
         src_episode_reward, src_episode_timesteps, src_episode_num = 0, 0, 0
 
         for t in range(int(config['max_step'])):
             src_episode_timesteps += 1
 
-            # select action randomly or according to policy, if the policy is deterministic, add exploration noise akin to TD3 implementation
             src_action = (
-                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
+                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.1, size=action_dim)
             ).clip(-max_action, max_action)
 
             src_next_state, src_reward, src_done, _ = src_env.step(src_action)
@@ -424,10 +407,11 @@ if __name__ == "__main__":
             src_state = src_next_state
             src_episode_reward += src_reward
 
-            policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
+            # The initial state is None since there is no target env interaction
+            policy.train(src_replay_buffer, tar_replay_buffer, None, config['batch_size'], writer)
 
             if src_done:
-                print("Total T: {} Episode Num: {} Episode T: {} Reward: {}".format(t+1, src_episode_num+1, src_episode_timesteps, src_episode_reward))
+                print(f"Total T: {t+1} Src Episode Num: {src_episode_num+1} Episode T: {src_episode_timesteps} Reward: {src_episode_reward:.3f}")
                 writer.add_scalar('train/source return', src_episode_reward, global_step = t+1)
 
                 src_state, src_done = src_env.reset(), False
@@ -449,8 +433,9 @@ if __name__ == "__main__":
                     policy.save('{}/models/model'.format(outdir))
     else:
         # offline-offline learning
+        # NOTE: LIBERTY exploration is not applicable here
         for t in range(int(config['max_step'])):
-            policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
+            policy.train(src_replay_buffer, tar_replay_buffer, None, config['batch_size'], writer)
 
             if (t + 1) % config['eval_freq'] == 0:
                 src_eval_return = eval_policy(policy, src_eval_env, eval_cnt=eval_cnt)
