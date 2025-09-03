@@ -9,6 +9,8 @@ import numpy as np
 from torch.nn import functional as F
 from torch.distributions import Normal, kl_divergence
 
+from sklearn.cluster import MiniBatchKMeans
+from collections import defaultdict
 
 class ReplayBuffer(object):
     def __init__(self, state_dim, action_dim, device, max_size=int(1e6)):
@@ -45,7 +47,7 @@ class ReplayBuffer(object):
             torch.FloatTensor(self.reward[ind]).to(self.device),
             torch.FloatTensor(self.not_done[ind]).to(self.device)
         )
-    
+
     def convert_D4RL(self, dataset):
         self.state = dataset['observations']
         self.action = dataset['actions']
@@ -53,7 +55,7 @@ class ReplayBuffer(object):
         self.reward = dataset['rewards'].reshape(-1,1)
         self.not_done = 1. - dataset['terminals'].reshape(-1,1)
         self.size = self.state.shape[0]
-        
+
 
 class MLP(nn.Module):
 
@@ -164,7 +166,7 @@ class ParallelizedEnsembleFlattenMLP(nn.Module):
 
         self.hidden_activation = F.relu
         self.output_activation = identity
-        
+
         self.layer_norm = layer_norm
 
         self.fcs = []
@@ -204,7 +206,7 @@ class ParallelizedEnsembleFlattenMLP(nn.Module):
         flat_inputs = torch.cat(inputs, dim=-1)
 
         state_dim = inputs[0].shape[-1]
-        
+
         dim=len(flat_inputs.shape)
         # repeat h to make amenable to parallelization
         # if dim = 3, then we probably already did this somewhere else
@@ -214,7 +216,7 @@ class ParallelizedEnsembleFlattenMLP(nn.Module):
             if dim == 1:
                 flat_inputs = flat_inputs.unsqueeze(0)
             flat_inputs = flat_inputs.repeat(self.ensemble_size, 1, 1)
-        
+
         # input normalization
         h = flat_inputs
 
@@ -236,11 +238,127 @@ class ParallelizedEnsembleFlattenMLP(nn.Module):
 
         # output is (ensemble_size, batch_size, output_size)
         return output
-    
+
     def sample(self, *inputs):
         preds = self.forward(*inputs)
 
         sample_idxs = np.random.choice(self.ensemble_size, 2, replace=False)
         preds_sample = preds[sample_idxs]
-        
+
         return torch.min(preds_sample, dim=0)[0], sample_idxs
+
+class KMeansStateNovelty:
+    """
+    An online novelty detector for continuous state spaces using Mini-Batch K-Means.
+
+    A new state is considered novel if its distance to the nearest cluster centroid
+    exceeds a dynamically calculated percentile-based threshold for that specific cluster.
+    The model is updated incrementally using partial_fit.
+    """
+
+    def __init__(self, state_dim: int, n_clusters: int = 50, novelty_percentile: int = 90,
+                 warmup_steps: int = 2000, update_threshold_freq: int = 1000):
+        """
+        Initializes the KMeansStateNovelty detector.
+
+        Args:
+            state_dim (int): The dimensionality of the state space.
+            n_clusters (int): The number of clusters (k) to partition the state space into.
+            novelty_percentile (int): The percentile of intra-cluster distances to use as the
+                                      novelty threshold (e.g., 99 means a point is novel if it's
+                                      further than 99% of existing points in its cluster).
+            warmup_steps (int): The number of initial states to collect before the first
+                                model fit. All states are considered novel during this phase.
+            update_threshold_freq (int): How often (in steps) to recalculate the novelty
+                                         thresholds for each cluster.
+        """
+        if not (0 < novelty_percentile < 100):
+            raise ValueError("novelty_percentile must be between 0 and 100.")
+
+        self.state_dim = state_dim
+        self.n_clusters = n_clusters
+        self.novelty_percentile = novelty_percentile
+        self.warmup_steps = warmup_steps
+        self.update_threshold_freq = update_threshold_freq
+
+        self.model = MiniBatchKMeans(
+            n_clusters=self.n_clusters,
+            n_init=10,  # Use multiple initializations for the first fit
+            batch_size=256,
+            max_iter=100
+        )
+
+        self.warmup_buffer = []
+        self.is_warmed_up = False
+        self.steps_since_threshold_update = 0
+
+        # Data structures for online threshold calculation
+        self.cluster_thresholds = np.zeros(self.n_clusters)
+        self.cluster_distances = defaultdict(list)
+
+    def _calculate_thresholds(self):
+        """Calculates the novelty threshold for each cluster based on stored distances."""
+        for i in range(self.n_clusters):
+            if self.cluster_distances[i]:
+                self.cluster_thresholds[i] = np.percentile(
+                    self.cluster_distances[i], self.novelty_percentile
+                )
+            else:
+                # If a cluster has no points, set a very high threshold
+                self.cluster_thresholds[i] = np.inf
+
+    def check_and_update(self, state: np.ndarray) -> bool:
+        """
+        Checks if a new state is novel and updates the internal model.
+
+        Args:
+            state (np.ndarray): The new state vector from the environment.
+
+        Returns:
+            bool: True if the state is considered novel, False otherwise.
+        """
+        if state.shape[0] != self.state_dim:
+            raise ValueError(f"Input state dimension {state.shape[0]} does not match initialized dimension {self.state_dim}")
+
+        state_reshaped = state.reshape(1, -1)
+
+        # --- Warm-up Phase ---
+        if not self.is_warmed_up:
+            self.warmup_buffer.append(state)
+            if len(self.warmup_buffer) >= self.warmup_steps:
+                # First fit on the collected data
+                warmup_data = np.array(self.warmup_buffer)
+                self.model.fit(warmup_data)
+
+                # Initial threshold calculation
+                labels = self.model.predict(warmup_data)
+                distances = np.linalg.norm(warmup_data - self.model.cluster_centers_[labels], axis=1)
+                for i, dist in enumerate(distances):
+                    self.cluster_distances[labels[i]].append(dist)
+                self._calculate_thresholds()
+
+                self.is_warmed_up = True
+                self.warmup_buffer = [] # Clear buffer to save memory
+            return True
+
+        # --- Online Phase ---
+        # Predict the cluster for the new state
+        cluster_idx = self.model.predict(state_reshaped)[0]
+
+        # Calculate distance to the assigned centroid
+        centroid = self.model.cluster_centers_[cluster_idx]
+        distance = np.linalg.norm(state - centroid)
+
+        # Check for novelty
+        is_novel = distance > self.cluster_thresholds[cluster_idx]
+
+        # Update the model and statistics
+        self.model.partial_fit(state_reshaped)
+        self.cluster_distances[cluster_idx].append(distance)
+
+        self.steps_since_threshold_update += 1
+        if self.steps_since_threshold_update >= self.update_threshold_freq:
+            self._calculate_thresholds()
+            self.steps_since_threshold_update = 0
+
+        return is_novel
