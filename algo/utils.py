@@ -362,3 +362,97 @@ class KMeansStateNovelty:
             self.steps_since_threshold_update = 0
 
         return is_novel
+
+class ClusteredBonus:
+    """
+    Calculates an intrinsic bonus reward based on state clustering to balance
+    novelty (visitation count) and quality (average reward of a cluster).
+    """
+    def __init__(self, state_dim: int, n_clusters: int = 50, eta: float = 0.5,
+                 warmup_steps: int = 2000):
+        """
+        Initializes the ClusteredBonus module.
+
+        Args:
+            state_dim (int): The dimensionality of the state space.
+            n_clusters (int): The number of clusters (k) to partition the state space into.
+            eta (float): The coefficient to balance novelty (1/N) and quality (R/N).
+                         Value should be between 0 and 1.
+            warmup_steps (int): Number of initial states to collect before the first model fit.
+        """
+        if not (0 <= eta <= 1):
+            raise ValueError("eta must be between 0 and 1.")
+
+        self.state_dim = state_dim
+        self.n_clusters = n_clusters
+        self.eta = eta
+        self.warmup_steps = warmup_steps
+
+        self.model = MiniBatchKMeans(
+            n_clusters=self.n_clusters,
+            n_init=10,
+            batch_size=256,
+            max_iter=100
+        )
+
+        self.warmup_buffer = []
+        self.is_warmed_up = False
+
+        # N_k: Visitation count for each cluster
+        self.cluster_visitation_counts = np.zeros(self.n_clusters, dtype=np.float32)
+        # R_k: Sum of extrinsic rewards for each cluster
+        self.cluster_reward_sums = np.zeros(self.n_clusters, dtype=np.float32)
+
+    def update_and_get_bonus(self, state: np.ndarray, extrinsic_reward: float) -> float:
+        """
+        Updates the model with a new state-reward pair and returns the calculated intrinsic bonus.
+
+        Args:
+            state (np.ndarray): The new state vector from the environment.
+            extrinsic_reward (float): The extrinsic reward received for that state.
+
+        Returns:
+            float: The calculated intrinsic bonus reward.
+        """
+        state_reshaped = state.reshape(1, -1)
+
+        # --- Warm-up Phase ---
+        if not self.is_warmed_up:
+            self.warmup_buffer.append((state, extrinsic_reward))
+            if len(self.warmup_buffer) >= self.warmup_steps:
+                # First fit on the collected data
+                warmup_states = np.array([s for s, r in self.warmup_buffer])
+                self.model.fit(warmup_states)
+
+                # Initialize counts and rewards from warmup data
+                labels = self.model.predict(warmup_states)
+                for i, (s, r) in enumerate(self.warmup_buffer):
+                    cluster_idx = labels[i]
+                    self.cluster_visitation_counts[cluster_idx] += 1
+                    self.cluster_reward_sums[cluster_idx] += r
+
+                self.is_warmed_up = True
+                self.warmup_buffer = [] # Clear buffer
+            return 0.0 # No bonus during warmup
+
+        # --- Online Phase ---
+        # Predict the cluster for the new state
+        cluster_idx = self.model.predict(state_reshaped)[0]
+
+        # Get current stats for the cluster
+        N = self.cluster_visitation_counts[cluster_idx]
+        R = self.cluster_reward_sums[cluster_idx]
+
+        # Calculate bonus before updating stats to get novelty for the *current* visit
+        # Add 1 to denominator to avoid division by zero and handle first visit correctly
+        novelty_bonus = 1.0 / (N + 1.0)
+        quality_bonus = R / (N + 1.0) if N > 0 else 0.0
+        
+        bonus = self.eta * novelty_bonus + (1.0 - self.eta) * quality_bonus
+
+        # Update the model and statistics
+        self.model.partial_fit(state_reshaped)
+        self.cluster_visitation_counts[cluster_idx] += 1
+        self.cluster_reward_sums[cluster_idx] += extrinsic_reward
+
+        return bonus

@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal, TransformedDistribution, constraints
 
 from torch.distributions.transforms import Transform
+from ..utils import ClusteredBonus
 
 
 class TanhTransform(Transform):
@@ -131,7 +132,7 @@ class DARC(object):
                  device,
                  target_entropy=None,
                  ):
-        self.config=  config
+        self.config = config
         self.device = device
         self.discount = config['gamma']
         self.tau = config['tau']
@@ -140,33 +141,57 @@ class DARC(object):
 
         self.total_it = 0
 
-        # aka critic
+        # --- Existing Transfer Policy Components ---
         self.q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
         self.target_q_funcs = copy.deepcopy(self.q_funcs)
         self.target_q_funcs.eval()
         for p in self.target_q_funcs.parameters():
             p.requires_grad = False
-
-        # aka actor
         self.policy = Policy(config['state_dim'], config['action_dim'], config['max_action'], hidden_size=config['hidden_sizes']).to(self.device)
-
-        # aka temperature
         if config['temperature_opt']:
             self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         else:
             self.log_alpha = torch.log(torch.FloatTensor([0.2])).to(self.device)
-        
-        # aka classifier
-        self.classifier = Classifier(config['state_dim'], config['action_dim'], config['hidden_sizes'], config['gaussian_noise_std']).to(self.device)
-
         self.q_optimizer = torch.optim.Adam(self.q_funcs.parameters(), lr=config['critic_lr'])
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=config['actor_lr'])
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
+
+        # --- New Exploratory Policy Components ---
+        self.exploratory_q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.exploratory_target_q_funcs = copy.deepcopy(self.exploratory_q_funcs)
+        self.exploratory_target_q_funcs.eval()
+        for p in self.exploratory_target_q_funcs.parameters():
+            p.requires_grad = False
+        self.exploratory_policy = Policy(config['state_dim'], config['action_dim'], config['max_action'], hidden_size=config['hidden_sizes']).to(self.device)
+        if config['temperature_opt']:
+            self.exploratory_log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+        else:
+            self.exploratory_log_alpha = torch.log(torch.FloatTensor([0.2])).to(self.device)
+        self.exploratory_q_optimizer = torch.optim.Adam(self.exploratory_q_funcs.parameters(), lr=config['critic_lr'])
+        self.exploratory_policy_optimizer = torch.optim.Adam(self.exploratory_policy.parameters(), lr=config['actor_lr'])
+        self.exploratory_temp_optimizer = torch.optim.Adam([self.exploratory_log_alpha], lr=config['actor_lr'])
+
+        # --- Classifier and Bonus Module ---
+        self.classifier = Classifier(config['state_dim'], config['action_dim'], config['hidden_sizes'], config['gaussian_noise_std']).to(self.device)
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=config['actor_lr'])
-    
-    def select_action(self, state, test=True):
+        
+        # ADD: Instantiate the bonus module
+        self.clustered_bonus = ClusteredBonus(
+            state_dim=config['state_dim'],
+            n_clusters=config.get('n_clusters', 50),
+            eta=config.get('eta', 0.5),
+            warmup_steps=config.get('bonus_warmup', 2000)
+        )
+
+    # ADD: A new method to get the intrinsic bonus
+    def get_intrinsic_bonus(self, state, extrinsic_reward):
+        return self.clustered_bonus.update_and_get_bonus(state, extrinsic_reward)
+
+    def select_action(self, state, test=True, use_exploratory_policy=False): # MODIFIED
         with torch.no_grad():
-            action, _, mean = self.policy(torch.Tensor(state).view(1,-1).to(self.device))
+            # MODIFIED: Select policy based on flag
+            policy_to_use = self.exploratory_policy if use_exploratory_policy else self.policy
+            action, _, mean = policy_to_use(torch.Tensor(state).view(1,-1).to(self.device))
         if test:
             return mean.squeeze().cpu().numpy()
         else:
@@ -205,6 +230,10 @@ class DARC(object):
         with torch.no_grad():
             for target_q_param, q_param in zip(self.target_q_funcs.parameters(), self.q_funcs.parameters()):
                 target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
+            
+            # ADD: Update for exploratory networks
+            for target_q_param, q_param in zip(self.exploratory_target_q_funcs.parameters(), self.exploratory_q_funcs.parameters()):
+                target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
 
     def update_q_functions(self, state_batch, action_batch, reward_batch, nextstate_batch, not_done_batch, writer=None):
         with torch.no_grad():
@@ -229,60 +258,99 @@ class DARC(object):
         temp_loss = -self.alpha * (logprobs_batch.detach() + self.target_entropy).mean()
         return policy_loss, temp_loss
 
+    def update_exploratory_q_functions(self, state_batch, action_batch, reward_batch, nextstate_batch, not_done_batch):
+        with torch.no_grad():
+            nextaction_batch, logprobs_batch, _ = self.exploratory_policy(nextstate_batch, get_logprob=True)
+            q_t1, q_t2 = self.exploratory_target_q_funcs(nextstate_batch, nextaction_batch)
+            q_target = torch.min(q_t1, q_t2)
+            value_target = reward_batch + not_done_batch * self.discount * (q_target - self.exploratory_alpha * logprobs_batch)
+        q_1, q_2 = self.exploratory_q_funcs(state_batch, action_batch)
+        loss = F.mse_loss(q_1, value_target) + F.mse_loss(q_2, value_target)
+        return loss
+
+    def update_exploratory_policy_and_temp(self, state_batch):
+        action_batch, logprobs_batch, _ = self.exploratory_policy(state_batch, get_logprob=True)
+        q_b1, q_b2 = self.exploratory_q_funcs(state_batch, action_batch)
+        qval_batch = torch.min(q_b1, q_b2)
+        policy_loss = (self.exploratory_alpha * logprobs_batch - qval_batch).mean()
+        temp_loss = -self.exploratory_alpha * (logprobs_batch.detach() + self.target_entropy).mean()
+        return policy_loss, temp_loss
+
     def train(self, src_replay_buffer, tar_replay_buffer, batch_size=128, writer=None):
 
         self.total_it += 1
 
-        if src_replay_buffer.size < 2*batch_size or tar_replay_buffer.size < batch_size:
-            return
-        
-        # follow the original paper, DARC has a warmup phase that does not involve reward modification
-        if self.total_it <= int(1e5):
-            src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(2*batch_size)
-        else:
-            if self.total_it % self.config['tar_env_interact_freq'] == 0:
-                self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
+        # --- 1. Train Transfer Policy on Source Data (Original DARC logic) ---
+        if src_replay_buffer.size >= 2 * batch_size:
+            # DARC warmup and reward modification logic
+            if self.total_it <= int(1e5):
+                src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(2 * batch_size)
+            else:
+                if self.total_it % self.config['tar_env_interact_freq'] == 0:
+                    self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
+                src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(2 * batch_size)
+                with torch.no_grad():
+                    sas_probs, sa_probs = self.classifier(src_state, src_action, src_next_state, with_noise=False)
+                    sas_log_probs, sa_log_probs = torch.log(sas_probs + 1e-10), torch.log(sa_probs + 1e-10)
+                    reward_penalty = sas_log_probs[:, 1:] - sa_log_probs[:, 1:] - sas_log_probs[:, :1] + sa_log_probs[:,:1]
+                    if writer is not None and self.total_it % 5000 == 0:
+                        writer.add_scalar('train/reward penalty', reward_penalty.mean(), global_step=self.total_it)
+                    src_reward += self.config['penalty_coefficient'] * reward_penalty
 
-            src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(2 * batch_size)
+            # Standard SAC update for the transfer policy
+            q_loss_step = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
+            self.q_optimizer.zero_grad()
+            q_loss_step.backward()
+            self.q_optimizer.step()
 
-            # we do reward modification
-            with torch.no_grad():
-                sas_probs, sa_probs = self.classifier(src_state, src_action, src_next_state, with_noise=False)
-                sas_log_probs, sa_log_probs = torch.log(sas_probs + 1e-10), torch.log(sa_probs + 1e-10)
-                reward_penalty = sas_log_probs[:, 1:] - sa_log_probs[:, 1:] - sas_log_probs[:, :1] + sa_log_probs[:,:1]
+            for p in self.q_funcs.parameters():
+                p.requires_grad = False
+            pi_loss_step, a_loss_step = self.update_policy_and_temp(src_state)
+            self.policy_optimizer.zero_grad()
+            pi_loss_step.backward()
+            self.policy_optimizer.step()
+            if self.config['temperature_opt']:
+                self.temp_optimizer.zero_grad()
+                a_loss_step.backward()
+                self.temp_optimizer.step()
+            for p in self.q_funcs.parameters():
+                p.requires_grad = True
 
-                if writer is not None and self.total_it % 5000 == 0:
-                    writer.add_scalar('train/reward penalty', reward_penalty.mean(), global_step=self.total_it)
+        # --- 2. Train Exploratory Policy on Target Data (New logic) ---
+        if tar_replay_buffer.size >= batch_size:
+            tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
+            
+            # Standard SAC update for the exploratory policy
+            expl_q_loss_step = self.update_exploratory_q_functions(tar_state, tar_action, tar_reward, tar_next_state, tar_not_done)
+            self.exploratory_q_optimizer.zero_grad()
+            expl_q_loss_step.backward()
+            self.exploratory_q_optimizer.step()
 
-                src_reward += self.config['penalty_coefficient'] * reward_penalty
+            for p in self.exploratory_q_funcs.parameters():
+                p.requires_grad = False
+            expl_pi_loss_step, expl_a_loss_step = self.update_exploratory_policy_and_temp(tar_state)
+            self.exploratory_policy_optimizer.zero_grad()
+            expl_pi_loss_step.backward()
+            self.exploratory_policy_optimizer.step()
+            if self.config['temperature_opt']:
+                self.exploratory_temp_optimizer.zero_grad()
+                expl_a_loss_step.backward()
+                self.exploratory_temp_optimizer.step()
+            for p in self.exploratory_q_funcs.parameters():
+                p.requires_grad = True
 
-        q_loss_step = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
-
-        self.q_optimizer.zero_grad()
-        q_loss_step.backward()
-        self.q_optimizer.step()
-
-        self.update_target()
-
-        # update policy and temperature parameter
-        for p in self.q_funcs.parameters():
-            p.requires_grad = False
-        pi_loss_step, a_loss_step = self.update_policy_and_temp(src_state)
-        self.policy_optimizer.zero_grad()
-        pi_loss_step.backward()
-        self.policy_optimizer.step()
-
-        if self.config['temperature_opt']:
-            self.temp_optimizer.zero_grad()
-            a_loss_step.backward()
-            self.temp_optimizer.step()
-
-        for p in self.q_funcs.parameters():
-            p.requires_grad = True
+        # --- 3. Update Target Networks ---
+        if self.total_it % self.update_interval == 0:
+            self.update_target()
 
     @property
     def alpha(self):
         return self.log_alpha.exp()
+
+    # ADD: Property for exploratory alpha
+    @property
+    def exploratory_alpha(self):
+        return self.exploratory_log_alpha.exp()
 
     def save(self, filename):
         torch.save(self.q_funcs.state_dict(), filename + "_critic")
