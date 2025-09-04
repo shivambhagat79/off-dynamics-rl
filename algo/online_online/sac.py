@@ -47,7 +47,7 @@ class TanhTransform(Transform):
 
 
 class MLPNetwork(nn.Module):
-    
+
     def __init__(self, input_dim, output_dim, hidden_size=256):
         super(MLPNetwork, self).__init__()
         self.network = nn.Sequential(
@@ -57,7 +57,7 @@ class MLPNetwork(nn.Module):
                         nn.ReLU(),
                         nn.Linear(hidden_size, output_dim),
                         )
-    
+
     def forward(self, x):
         return self.network(x)
 
@@ -84,11 +84,11 @@ class Policy(nn.Module):
         else:
             logprob = None
         mean = torch.tanh(mu)
-        
+
         return action * self.max_action, logprob, mean * self.max_action
 
 class DoubleQFunc(nn.Module):
-    
+
     def __init__(self, state_dim, action_dim, hidden_size=256):
         super(DoubleQFunc, self).__init__()
         self.network1 = MLPNetwork(state_dim + action_dim, 1, hidden_size)
@@ -134,7 +134,7 @@ class SAC(object):
         self.q_optimizer = torch.optim.Adam(self.q_funcs.parameters(), lr=config['critic_lr'])
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=config['actor_lr'])
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
-    
+
     def select_action(self, state, test=True):
         with torch.no_grad():
             action, _, mean = self.policy(torch.Tensor(state).view(1,-1).to(self.device))
@@ -172,7 +172,7 @@ class SAC(object):
         temp_loss = -self.alpha * (logprobs_batch.detach() + self.target_entropy).mean()
         return policy_loss, temp_loss
 
-    def train(self, src_replay_buffer, tar_replay_buffer, batch_size=128, writer=None):
+    def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=128, writer=None):
 
         self.total_it += 1
 
