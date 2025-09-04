@@ -316,7 +316,7 @@ if __name__ == "__main__":
 
             policy.train(src_replay_buffer, tar_replay_buffer, current_episode_initial_state, config['batch_size'], writer)
 
-            if (tar_steps > 0 and tar_steps % 200 == 0):
+            if (tar_steps > 0 and tar_steps % 250 == 0):
                 writer.add_scalar('novelty/total_novel_states', total_novel_states, global_step=tar_steps)
 
             if src_done:

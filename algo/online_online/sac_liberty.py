@@ -134,19 +134,18 @@ class SAC_LIBERTY(object):
             self.log_alpha = torch.log(torch.FloatTensor([0.2])).to(self.device)
 
         # --- LIBERTY Exploration Components ---
-        self.use_liberty = config.get('use_liberty', False)
-        if self.use_liberty:
-            self.metric_model = MetricModel(config['state_dim'], hidden_size=config['hidden_sizes']).to(self.device)
-            self.inverse_model = InverseDynamicsModel(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
-            self.forward_model = ForwardDynamicsModel(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
 
-            self.metric_optimizer = torch.optim.Adam(self.metric_model.parameters(), lr=config['liberty_lr'])
-            # Both dynamics models can be trained with a single optimizer
-            self.dynamics_optimizer = torch.optim.Adam(
-                list(self.inverse_model.parameters()) + list(self.forward_model.parameters()),
-                lr=config['liberty_lr']
-            )
-            self.intrinsic_reward_coef = config['intrinsic_reward_coef']
+        self.metric_model = MetricModel(config['state_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.inverse_model = InverseDynamicsModel(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.forward_model = ForwardDynamicsModel(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+
+        self.metric_optimizer = torch.optim.Adam(self.metric_model.parameters(), lr=config['liberty_lr'])
+        # Both dynamics models can be trained with a single optimizer
+        self.dynamics_optimizer = torch.optim.Adam(
+            list(self.inverse_model.parameters()) + list(self.forward_model.parameters()),
+            lr=config['liberty_lr']
+        )
+        self.intrinsic_reward_coef = config['intrinsic_reward_coef']
         # --- End LIBERTY Components ---
 
         self.q_optimizer = torch.optim.Adam(self.q_funcs.parameters(), lr=config['critic_lr'])
@@ -242,7 +241,7 @@ class SAC_LIBERTY(object):
         self.total_it += 1
 
         # Only train on target buffer if it has enough samples
-        if self.use_liberty and tar_replay_buffer.size >= batch_size:
+        if tar_replay_buffer.size >= batch_size:
             tar_state, tar_action, tar_next_state, tar_reward, _ = tar_replay_buffer.sample(batch_size)
             self._update_liberty_models(tar_state, tar_action, tar_reward, tar_next_state, writer)
 
@@ -254,22 +253,22 @@ class SAC_LIBERTY(object):
         tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
 
         # --- Add LIBERTY intrinsic reward to target transitions ONLY ---
-        if self.use_liberty:
-            with torch.no_grad():
-                # Potential Phi(s) is d(s, s_0)
-                # We need a batch of initial states matching the tar_state batch size
-                initial_state_batch = torch.Tensor(initial_state).expand_as(tar_state).to(self.device)
 
-                potential_s = self.metric_model(tar_state, initial_state_batch)
-                potential_s_next = self.metric_model(tar_next_state, initial_state_batch)
+        with torch.no_grad():
+            # Potential Phi(s) is d(s, s_0)
+            # We need a batch of initial states matching the tar_state batch size
+            initial_state_batch = torch.Tensor(initial_state).expand_as(tar_state).to(self.device)
 
-                # Shaping reward F = gamma * Phi(s') - Phi(s)
-                intrinsic_reward = self.discount * potential_s_next - potential_s
+            potential_s = self.metric_model(tar_state, initial_state_batch)
+            potential_s_next = self.metric_model(tar_next_state, initial_state_batch)
 
-                if writer is not None and self.total_it % 1000 == 0:
-                    writer.add_scalar('liberty/intrinsic_reward_mean', intrinsic_reward.mean().item(), self.total_it)
+            # Shaping reward F = gamma * Phi(s') - Phi(s)
+            intrinsic_reward = self.discount * potential_s_next - potential_s
 
-                tar_reward += self.intrinsic_reward_coef * intrinsic_reward
+            if writer is not None and self.total_it % 1000 == 0:
+                writer.add_scalar('liberty/intrinsic_reward_mean', intrinsic_reward.mean().item(), self.total_it)
+
+            tar_reward += self.intrinsic_reward_coef * intrinsic_reward
         # --- End intrinsic reward calculation ---
 
         state = torch.cat([src_state, tar_state], 0)
@@ -315,9 +314,9 @@ class SAC_LIBERTY(object):
         torch.save(self.q_optimizer.state_dict(), filename + "_critic_optimizer")
         torch.save(self.policy.state_dict(), filename + "_actor")
         torch.save(self.policy_optimizer.state_dict(), filename + "_actor_optimizer")
-        if self.use_liberty:
-            torch.save(self.metric_model.state_dict(), filename + "_metric_model")
-            torch.save(self.dynamics_optimizer.state_dict(), filename + "_dynamics_optimizer")
+
+        torch.save(self.metric_model.state_dict(), filename + "_metric_model")
+        torch.save(self.dynamics_optimizer.state_dict(), filename + "_dynamics_optimizer")
 
 
     def load(self, filename):
@@ -325,6 +324,6 @@ class SAC_LIBERTY(object):
         self.q_optimizer.load_state_dict(torch.load(filename + "_critic_optimizer"))
         self.policy.load_state_dict(torch.load(filename + "_actor"))
         self.policy_optimizer.load_state_dict(torch.load(filename + "_actor_optimizer"))
-        if self.use_liberty:
-            self.metric_model.load_state_dict(torch.load(filename + "_metric_model"))
-            self.dynamics_optimizer.load_state_dict(torch.load(filename + "_dynamics_optimizer"))
+
+        self.metric_model.load_state_dict(torch.load(filename + "_metric_model"))
+        self.dynamics_optimizer.load_state_dict(torch.load(filename + "_dynamics_optimizer"))
