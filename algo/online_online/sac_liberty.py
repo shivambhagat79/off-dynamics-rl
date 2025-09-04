@@ -101,7 +101,7 @@ class DoubleQFunc(nn.Module):
         return self.network1(x), self.network2(x)
 
 
-class SAC(object):
+class SAC_LIBERTY(object):
 
     def __init__(self,
                  config,
