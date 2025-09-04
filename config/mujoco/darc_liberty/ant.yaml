@@ -1,10 +1,8 @@
-ac_gradient_clip: 100
 alpha: 0.2
 batch_size: 128
 actor_lr: 0.0003
 critic_lr: 0.0003
 gamma: 0.99
-max_epochs_since_update_decay_interval: 150000.0
 
 liberty_lr: 0.0001
 intrinsic_reward_coef: 1.0
@@ -13,6 +11,9 @@ state_dim: 17
 action_dim: 3
 hidden_sizes: 256
 max_action: 1
+
+gaussian_noise_std: 1.0
+penalty_coefficient: 1.0
 
 temperature_opt: False
 
