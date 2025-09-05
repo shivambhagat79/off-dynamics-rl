@@ -27,3 +27,9 @@ tar_env_interact_freq: 10
 device: cuda
 
 save_freq: 5000
+
+# ADD: Parameters for Clustered Bonus Reward
+n_clusters: 50
+eta: 0.5
+beta: 0.1
+bonus_warmup: 2000

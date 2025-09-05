@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.distributions import Normal, TransformedDistribution, constraints
 
 from torch.distributions.transforms import Transform
-from ..utils import ClusteredBonus
+from utils import ClusteredBonus
 
 
 class TanhTransform(Transform):
@@ -176,6 +176,7 @@ class DARC(object):
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=config['actor_lr'])
         
         # ADD: Instantiate the bonus module
+        self.beta = config.get('beta', 0.1)
         self.clustered_bonus = ClusteredBonus(
             state_dim=config['state_dim'],
             n_clusters=config.get('n_clusters', 50),
@@ -183,9 +184,9 @@ class DARC(object):
             warmup_steps=config.get('bonus_warmup', 2000)
         )
 
-    # ADD: A new method to get the intrinsic bonus
-    def get_intrinsic_bonus(self, state, extrinsic_reward):
-        return self.clustered_bonus.update_and_get_bonus(state, extrinsic_reward)
+    def get_total_reward(self, state, extrinsic_reward):
+        intrinsic_bonus = self.clustered_bonus.update_and_get_bonus(state, extrinsic_reward)
+        return extrinsic_reward + self.beta * intrinsic_bonus
 
     def select_action(self, state, test=True, use_exploratory_policy=False): # MODIFIED
         with torch.no_grad():

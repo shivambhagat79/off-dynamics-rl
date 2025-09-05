@@ -282,24 +282,32 @@ if __name__ == "__main__":
             if t % config['tar_env_interact_interval'] == 0:
                 tar_steps += 1
                 tar_episode_timesteps += 1
-                tar_action = policy.select_action(np.array(tar_state), test=False)
+                tar_action = policy.select_action(np.array(tar_state), test=False, use_exploratory_policy=True)
 
-                tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
+                tar_next_state, extrinsic_reward, tar_done, _ = tar_env.step(tar_action)
+                
+                # Keep the novelty counting for logging purposes
                 is_novel = kmeans_state_novelty.check_and_update(np.array(tar_next_state))
                 if is_novel:
                     total_novel_states += 1
                     tar_episode_novel_states += 1
+
+                # Get the total reward (extrinsic + scaled intrinsic) from the agent
+                total_reward = policy.get_total_reward(tar_state, extrinsic_reward)
+                
                 tar_done_bool = float(tar_done) if tar_episode_timesteps < src_env._max_episode_steps else 0
 
                 if 'antmaze' in args.env:
-                    tar_reward -= 1.0
+                    # NOTE: This subtraction is now applied to the total_reward, not just extrinsic.
+                    # This seems correct as it's a penalty for every step in the maze.
+                    total_reward -= 1.0
 
-                tar_replay_buffer.add(tar_state, tar_action, tar_next_state, tar_reward, tar_done_bool)
+                tar_replay_buffer.add(tar_state, tar_action, tar_next_state, total_reward, tar_done_bool)
 
                 tar_state = tar_next_state
-                tar_episode_reward += tar_reward
+                tar_episode_reward += extrinsic_reward # The episode reward for logging should still be the true, extrinsic reward
 
-            policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], writer)
+            policy.train(src_replay_buffer, tar_replay_buffer, config['batch_size'], )
             if (tar_steps % 200 == 0):
                 writer.add_scalar('novelty/total_novel_states', total_novel_states, global_step=tar_steps)
 

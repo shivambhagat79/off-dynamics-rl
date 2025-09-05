@@ -2,4 +2,5 @@
 logs/
 **/__pycache__/
 baselines/
+crl/
 liberty/
