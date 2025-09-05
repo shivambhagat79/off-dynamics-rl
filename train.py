@@ -276,7 +276,7 @@ if __name__ == "__main__":
             src_episode_timesteps += 1
 
             src_action = (
-                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.1, size=action_dim)
+                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
             ).clip(-max_action, max_action)
 
             src_next_state, src_reward, src_done, _ = src_env.step(src_action)
@@ -432,7 +432,7 @@ if __name__ == "__main__":
             src_episode_timesteps += 1
 
             src_action = (
-                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.1, size=action_dim)
+                policy.select_action(np.array(src_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
             ).clip(-max_action, max_action)
 
             src_next_state, src_reward, src_done, _ = src_env.step(src_action)
