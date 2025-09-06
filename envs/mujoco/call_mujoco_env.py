@@ -44,7 +44,7 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'morph' in env_name or 'kinematic' in env_name:
             return TimeLimit(
                 HopperEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
-                max_episode_steps=1000          
+                max_episode_steps=1000
             )
         else:
             print("env_name {env_name} is illegal or not implemented")
@@ -55,7 +55,7 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'friction' in env_name or 'gravity' in env_name:
             return TimeLimit(
                 HalfCheetahEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{float(shift_level)}.xml",),
-                max_episode_steps=1000            
+                max_episode_steps=1000
             )
         elif 'noise' in env_name:
             # todo: the modification is directly applied on the executed action, no need to modify the xml file itself
@@ -63,7 +63,12 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'morph' in env_name or 'kinematic' in env_name:
             return TimeLimit(
                 HalfCheetahEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
-                max_episode_steps=1000          
+                max_episode_steps=1000
+            )
+        elif 'crippled' in env_name:
+            return TimeLimit(
+                HalfCheetahEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/halfcheetah_crippled_thigh.xml",),
+                max_episode_steps=1000
             )
         else:
             print("env_name {env_name} is illegal or not implemented")
@@ -74,7 +79,7 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'friction' in env_name or 'gravity' in env_name:
             return TimeLimit(
                 Walker2dEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{float(shift_level)}.xml",),
-                max_episode_steps=1000            
+                max_episode_steps=1000
             )
         elif 'noise' in env_name:
             # todo: the modification is directly applied on the executed action, no need to modify the xml file itself
@@ -82,7 +87,7 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'morph' in env_name or 'kinematic' in env_name:
             return TimeLimit(
                 Walker2dEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
-                max_episode_steps=1000          
+                max_episode_steps=1000
             )
         else:
             print("env_name {env_name} is illegal or not implemented")
@@ -93,7 +98,7 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'friction' in env_name or 'gravity' in env_name:
             return TimeLimit(
                 AntEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{float(shift_level)}.xml",),
-                max_episode_steps=1000            
+                max_episode_steps=1000
             )
         elif 'noise' in env_name:
             # todo: the modification is directly applied on the executed action, no need to modify the xml file itself
@@ -101,7 +106,7 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'morph' in env_name or 'kinematic' in env_name:
             return TimeLimit(
                 AntEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
-                max_episode_steps=1000          
+                max_episode_steps=1000
             )
         else:
             print("env_name {env_name} is illegal or not implemented")

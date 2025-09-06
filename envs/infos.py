@@ -251,6 +251,8 @@ REF_MAX_SCORE = {
 }
 
 def get_normalized_score(score, env_name):
+    if env_name not in REF_MIN_SCORE or env_name not in REF_MAX_SCORE:
+        return score
     ref_min_score = REF_MIN_SCORE[env_name]
     ref_max_score = REF_MAX_SCORE[env_name]
     return (score - ref_min_score) / (ref_max_score - ref_min_score) * 100
