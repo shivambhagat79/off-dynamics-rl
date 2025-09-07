@@ -43,7 +43,7 @@ def call_env_terminal_func(env_name: str) -> Callable:
             not_done = not_done.to(state.device)
         else:
             raise ValueError
-            
+
         if return_done:
             done = ~not_done
             return done
@@ -61,7 +61,7 @@ def call_env_terminal_func(env_name: str) -> Callable:
             not_done = is_finite & is_healthy
         else:
             raise ValueError
-            
+
         if return_done:
             done = ~not_done
             return done
@@ -79,20 +79,20 @@ def call_env_terminal_func(env_name: str) -> Callable:
             not_done = (0.8 < height) & (height < 2.0) & (-1.0 < angle) & (angle < 1.0)
         else:
             raise ValueError
-            
+
         if return_done:
             done = ~not_done
             return done
         else:
             return not_done
-    
+
     def is_terminal_region_for_others(state: Union[np.ndarray, torch.Tensor], return_done: bool) -> Union[np.array, torch.tensor]:
         not_done = True
         return not_done
-    
+
     env_name = env_name.lower()
-        
-    if "hopper" in env_name:        
+
+    if "hopper" in env_name:
         return is_terminal_region_for_hp
     elif "halfcheetah" in env_name:
         return is_terminal_region_for_hc
@@ -164,8 +164,8 @@ def call_activation(name: str) -> nn.Module:
 
 
 def call_mlp(
-    in_dim: int, 
-    out_dim: int, 
+    in_dim: int,
+    out_dim: int,
     hidden_layers: List[int],
     inner_activation: str = 'ReLU',
     output_activation: str = 'Tanh',
@@ -175,7 +175,7 @@ def call_mlp(
     module_seq = []
     InterActivation = call_activation(inner_activation)
     OutActivation   = call_activation(output_activation)
-    
+
     if not layer_factory:
         factory = nn.Linear
     else:
@@ -207,11 +207,11 @@ class Module(nn.Module):
 
 class QFunction(Module):
     def __init__(
-        self, 
-        s_dim: int, 
-        a_dim: int, 
-        hidden_layers: List[int], 
-        inner_nonlinear: str, 
+        self,
+        s_dim: int,
+        a_dim: int,
+        hidden_layers: List[int],
+        inner_nonlinear: str,
         initializer: str
     ) -> None:
         super(QFunction, self).__init__()
@@ -224,7 +224,7 @@ class QFunction(Module):
             output_activation   =   'Identity',
             initializer         =   initializer
         )
-    
+
     def forward(self, state: torch.tensor, action: torch.tensor) -> torch.tensor:
         return self._model(torch.cat([state, action], dim=-1))
 
@@ -241,7 +241,7 @@ class QEnsemble(Module):
     ) -> None:
         super().__init__()
         self.ensemble_size  = ensemble_size
-        self.s_dim          = s_dim 
+        self.s_dim          = s_dim
         self.a_dim          = a_dim
         self.ensemble       = nn.ModuleList(
             [QFunction(s_dim, a_dim, hiddens, inner_nonlinear, initializer) for _ in range(ensemble_size)]
@@ -253,7 +253,7 @@ class QEnsemble(Module):
 
     def forward_single(self, state: torch.tensor, action: torch.tensor, index: int) -> torch.tensor:
         return self.ensemble[index](state, action)
-    
+
 
 class SquashedGaussianPolicy(Module):
     def __init__(
@@ -307,7 +307,7 @@ class SquashedGaussianPolicy(Module):
         log_prob            =   log_prob - squashed_correction
 
         return action, log_prob, dist
-    
+
 
 
 class Normalizer(nn.Module):
@@ -341,8 +341,8 @@ class Normalizer(nn.Module):
 
 def init_weights(m):
     def truncated_normal_init(
-        t:  nn.Module, 
-        mean:   float = 0.0, 
+        t:  nn.Module,
+        mean:   float = 0.0,
         std:    float = 0.01
     ):
         torch.nn.init.normal_(t, mean=mean, std=std)
@@ -368,11 +368,11 @@ class EnsembleFC(nn.Module):
     weight: torch.Tensor
 
     def __init__(
-        self, 
-        in_features: int, 
-        out_features: int, 
-        ensemble_size: int, 
-        weight_decay: float = 0., 
+        self,
+        in_features: int,
+        out_features: int,
+        ensemble_size: int,
+        weight_decay: float = 0.,
         bias: bool = True
     ) -> None:
         super(EnsembleFC, self).__init__()
@@ -400,13 +400,13 @@ class EnsembleFC(nn.Module):
 
 class EnsembleModel(nn.Module):
     def __init__(
-        self, 
-        state_size:     int, 
-        action_size:    int, 
-        reward_size:    int, 
-        ensemble_size:  int, 
-        hidden_size:    int   = 200, 
-        learning_rate:  float = 1e-3, 
+        self,
+        state_size:     int,
+        action_size:    int,
+        reward_size:    int,
+        ensemble_size:  int,
+        hidden_size:    int   = 200,
+        learning_rate:  float = 1e-3,
         use_decay:      bool  = False,
         device:         str   = 'cuda'
     ):
@@ -432,8 +432,8 @@ class EnsembleModel(nn.Module):
         self.swish = Swish()
 
     def forward(
-        self, 
-        x:           torch.tensor, 
+        self,
+        x:           torch.tensor,
         ret_log_var: bool = False
     ):
         nn1_output = self.swish(self.nn1(x))
@@ -460,10 +460,10 @@ class EnsembleModel(nn.Module):
         return decay_loss
 
     def loss(
-        self, 
-        mean:           torch.tensor, 
-        logvar:         torch.tensor, 
-        labels:         torch.tensor, 
+        self,
+        mean:           torch.tensor,
+        logvar:         torch.tensor,
+        labels:         torch.tensor,
         inc_var_loss:   bool = True
     ):
         """
@@ -493,13 +493,13 @@ class EnsembleModel(nn.Module):
 
 class EnsembleDynamicsModel(Module):
     def __init__(
-        self, 
-        network_size:   int, 
-        elite_size:     int, 
-        state_size:     int, 
-        action_size:    int, 
-        reward_size:    int = 1, 
-        hidden_size:    int = 200, 
+        self,
+        network_size:   int,
+        elite_size:     int,
+        state_size:     int,
+        action_size:    int,
+        reward_size:    int = 1,
+        hidden_size:    int = 200,
         use_decay:      bool= False,
         device:         str = 'cuda',
     ):
@@ -517,11 +517,11 @@ class EnsembleDynamicsModel(Module):
         self.device = device
 
     def train(
-        self, 
-        inputs:                     torch.tensor, 
-        labels:                     torch.tensor, 
-        batch_size:                 int     = 256, 
-        holdout_ratio:              float   = 0., 
+        self,
+        inputs:                     torch.tensor,
+        labels:                     torch.tensor,
+        batch_size:                 int     = 256,
+        holdout_ratio:              float   = 0.,
         max_epochs_since_update:    int     = 5
     ):
         self._max_epochs_since_update   = max_epochs_since_update
@@ -569,12 +569,12 @@ class EnsembleDynamicsModel(Module):
                 break_train = self._save_best(epoch, holdout_mse_losses)
                 if break_train:
                     break
-                    
+
         self._track_head_loss(all_holdout_losses)
 
     def _save_best(
-        self, 
-        epoch:          int, 
+        self,
+        epoch:          int,
         holdout_losses: torch.tensor    # [ensemble_size]
     ):
         updated = False
@@ -603,8 +603,8 @@ class EnsembleDynamicsModel(Module):
 
     def predict(
         self,
-        inputs:                 torch.Tensor, 
-        batch_size:             float   = 1024, 
+        inputs:                 torch.Tensor,
+        batch_size:             float   = 1024,
         factor_ensemble:        bool    = True
     ):
         if inputs.ndim == 2:
@@ -614,7 +614,7 @@ class EnsembleDynamicsModel(Module):
             for i in range(0, B, batch_size):
                 input = inputs[i:min(i + batch_size, B)]
                 b_mean, b_var = self.ensemble_model(
-                    input[None, :, :].repeat([self.network_size, 1, 1]), 
+                    input[None, :, :].repeat([self.network_size, 1, 1]),
                     ret_log_var=False
                 )
                 ensemble_mean.append(b_mean)
@@ -651,7 +651,7 @@ class EnsembleDynamicsModel(Module):
                 var     = torch.mean(ensemble_var, dim=0) + torch.mean(torch.square(ensemble_mean - mean[None, :, :]), dim=0)
                 return mean, var
         else:
-            raise ValueError            
+            raise ValueError
 
 
 def soft_update(src_model: nn.Module, tar_model: nn.Module, tau: float) -> None:
@@ -660,7 +660,7 @@ def soft_update(src_model: nn.Module, tar_model: nn.Module, tau: float) -> None:
 
 
 class VGDF:
-    def __init__(self, 
+    def __init__(self,
                  config: Dict,
                  device,
                  target_entropy=None,
@@ -678,7 +678,7 @@ class VGDF:
         self.training_delay     =       config['training_delay']
 
         self.batch_size         =       config['batch_size']
-        
+
         self.ac_gradient_clip   =       config['ac_gradient_clip']
 
         self.dynamics_batch_size                    =       config['dynamics_batch_size']
@@ -686,7 +686,7 @@ class VGDF:
         self.dynamics_max_epochs_since_update       =       config['dynamics_max_epochs_since_update']
         self.dynamics_train_freq                    =       config['dynamics_train_freq']
         self.max_epochs_since_update_decay_interval =       config['max_epochs_since_update_decay_interval']
-        
+
         self.start_gate_src_sample          =       config['start_gate_src_sample']
         self.likelihood_gate_threshold      =       config['likelihood_gate_threshold']
 
@@ -716,7 +716,7 @@ class VGDF:
             initializer     =   self.model_config['policy_initializer']
         ).to(self.device)
         self.optimizer_policy   =   optim.Adam(self.policy.parameters(), self.lr)
-        
+
         # optimistic policy
         self.optimistic_policy  =   SquashedGaussianPolicy(
             s_dim           =   self.s_dim,
@@ -750,7 +750,7 @@ class VGDF:
         self.optimizer_value    =   optim.Adam(self.QFunction.parameters(), self.lr)
 
         # batch dynamics model
-        self.dynamics   =   EnsembleDynamicsModel( 
+        self.dynamics   =   EnsembleDynamicsModel(
             network_size=   self.model_config['dynamics_ensemble_size'],
             elite_size  =   self.model_config['dynamics_elite_size'],
             state_size  =   self.s_dim,
@@ -795,7 +795,7 @@ class VGDF:
         self.loss_log[f'loss_dynamics']                             =   self.dynamics._current_mean_ensemble_losses
         self.loss_log['current_dynamics_max_epochs_since_update']   =   current_dynamics_max_epochs_since_update
 
-    def train(self, src_replay_buffer, tar_replay_buffer, batch_size=128, writer=None) -> None:
+    def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=128, writer=None) -> None:
         self.training_count += 1
 
         # train dynamics model
@@ -806,7 +806,7 @@ class VGDF:
             return
         src_s, src_a, src_next_s, src_r, src_not_done       =   src_replay_buffer.sample(batch_size)
         tar_s, tar_a, tar_next_s, tar_r, tar_not_done       =   tar_replay_buffer.sample(batch_size)
-        
+
         assert len(src_not_done.shape) == len(src_r.shape) == len(tar_r.shape) == len(tar_not_done.shape) == 2
 
         # training q function
@@ -848,20 +848,20 @@ class VGDF:
                 loss_alpha.backward()
                 self.optimizer_alpha.step()
                 self.alpha = torch.exp(self.log_alpha)
-                
+
                 self.loss_log['alpha'] = self.alpha.detach().cpu().item()
                 self.loss_log['loss_alpha'] = loss_alpha.detach().cpu().item()
 
         # soft update target networks
         soft_update(self.QFunction, self.QFunction_tar, self.tau)
-        
+
         # write
         if writer is not None and self.training_count % 5000 == 0:
             for k_log, v_log in list(self.loss_log.items()):
                 writer.add_scalar(f'train/{k_log}', v_log, self.training_count)
 
     def update_q_functions(
-        self, 
+        self,
         src_s: torch.tensor, src_a: torch.tensor, src_r: torch.tensor, src_not_done: torch.tensor, src_next_s: torch.tensor,
         tar_s: torch.tensor, tar_a: torch.tensor, tar_r: torch.tensor, tar_not_done: torch.tensor, tar_next_s: torch.tensor,
         terminal_func: Callable,
@@ -916,21 +916,21 @@ class VGDF:
                 accept_gate             =   torch.ones_like(src_value_target, device=self.device)
             src_chosen_sample_idx       =   torch.where(accept_gate[:, 0] > 0)[0]
             self.loss_log['accept_gated_ratio']    =   torch.sum(accept_gate.int()).detach().item() / np.prod(accept_gate.shape)
-            
+
         # 5. obtain the loss wrt src samples
         src_q1, src_q2  =   self.QFunction(src_s, src_a)
         src_q_loss      =   (accept_gate * (src_q1 - src_value_target) ** 2).mean() + (accept_gate * (src_q2 - src_value_target) ** 2).mean()
-        
+
         self.loss_log['q_loss_src'] = src_q_loss.detach().item()
         self.loss_log['q_loss_tar'] = tar_q_loss.detach().item()
         return tar_q_loss + src_q_loss, src_chosen_sample_idx
-        
+
     def _value_expansion(self, src_s: torch.tensor, src_a: torch.tensor, terminal_func: Callable) -> torch.tensor:
         # imagine the next s in target domain
         dyna_pred_mean, dyna_pred_var = self.dynamics.predict(inputs=torch.cat([src_s, src_a], dim=-1), factor_ensemble=True)   # [ensemble_size, batch_size, 1 + |S|]
         dyna_pred_samples               =   dyna_pred_mean + torch.ones_like(dyna_pred_var, device=self.device) * dyna_pred_var
         dyna_pred_r, dyna_pred_delta_s  =   dyna_pred_samples[:, :, :1], dyna_pred_samples[:, :, 1:]
-        dyna_pred_next_s                =   src_s + dyna_pred_delta_s 
+        dyna_pred_next_s                =   src_s + dyna_pred_delta_s
 
         # expand via dynamics model
         state               =   dyna_pred_next_s
@@ -943,7 +943,7 @@ class VGDF:
         final_action        =   self.policy.sample_action(final_pred_next_s, with_noise=False)
         final_q1, final_q2  =   self.QFunction_tar(final_pred_next_s, final_action)
         final_value         =   torch.min(final_q1, final_q2)   # [ensemble_size, batch_size, 1]
-    
+
         TD_H_Value  =   cumulate_r + notdone * discount * final_value
         return TD_H_Value
 
@@ -969,7 +969,7 @@ class VGDF:
         torch.save(self.optimizer_policy.state_dict(), filename + "_actor_optimizer")
         torch.save(self.optimistic_policy.state_dict(), filename + "_actor_optimistic")
         torch.save(self.optimizer_opt_policy.state_dict(), filename + "_actor_optimistic_optimizer")
-    
+
     def load(self, filename: str) -> None:
         self.policy.load_state_dict(torch.load(filename + "_actor"))
         self.optimizer_policy.load_state_dict(torch.load(filename + "_actor_optimizer"))

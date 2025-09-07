@@ -46,7 +46,7 @@ class TanhTransform(Transform):
 
 
 class MLPNetwork(nn.Module):
-    
+
     def __init__(self, input_dim, output_dim, hidden_size=256):
         super(MLPNetwork, self).__init__()
         self.network = nn.Sequential(
@@ -56,7 +56,7 @@ class MLPNetwork(nn.Module):
                         nn.ReLU(),
                         nn.Linear(hidden_size, output_dim),
                         )
-    
+
     def forward(self, x):
         return self.network(x)
 
@@ -83,7 +83,7 @@ class Policy(nn.Module):
         else:
             logprob = None
         mean = torch.tanh(mu)
-        
+
         return action * self.max_action, logprob, mean * self.max_action
 
 def AvgL1Norm(x, eps=1e-8):
@@ -99,12 +99,12 @@ class Encoder(nn.Module):
         self.zs1 = nn.Linear(state_dim, hdim)
         self.zs2 = nn.Linear(hdim, hdim)
         self.zs3 = nn.Linear(hdim, zs_dim)
-        
+
         # state-action encoder
         self.zsa1 = nn.Linear(zs_dim + action_dim, hdim)
         self.zsa2 = nn.Linear(hdim, hdim)
         self.zsa3 = nn.Linear(hdim, zs_dim)
-    
+
 
     def zs(self, state):
         zs = self.activ(self.zs1(state))
@@ -122,7 +122,7 @@ class Encoder(nn.Module):
 
 
 class DoubleQFunc(nn.Module):
-    
+
     def __init__(self, state_dim, action_dim, hidden_size=256):
         super(DoubleQFunc, self).__init__()
         self.network1 = MLPNetwork(state_dim + action_dim, 1, hidden_size)
@@ -173,7 +173,7 @@ class PAR(object):
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=config['actor_lr'])
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
         self.encoder_optimizer = torch.optim.Adam(self.encoder.parameters(), lr=config['actor_lr'])
-    
+
     def select_action(self, state, test=True):
         with torch.no_grad():
             action, _, mean = self.policy(torch.Tensor(state).view(1,-1).to(self.device))
@@ -187,7 +187,7 @@ class PAR(object):
         with torch.no_grad():
             for target_q_param, q_param in zip(self.target_q_funcs.parameters(), self.q_funcs.parameters()):
                 target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
-            
+
             # update encoder
             for target_q_param, q_param in zip(self.encoder_target.parameters(), self.encoder.parameters()):
                 target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
@@ -217,8 +217,8 @@ class PAR(object):
         policy_loss = (self.alpha * logprobs_batch - qval_batch).mean()
         temp_loss = -self.alpha * (logprobs_batch.detach() + self.target_entropy).mean()
         return policy_loss, temp_loss
-    
-    
+
+
     def update_encoder(self, state_batch, action_batch, nextstate_batch, writer=None):
         with torch.no_grad():
             next_zs = self.encoder.zs(nextstate_batch)
@@ -235,7 +235,7 @@ class PAR(object):
             writer.add_scalar('train/encoder loss', encoder_loss, global_step=self.total_it)
 
 
-    def train(self, src_replay_buffer, tar_replay_buffer, batch_size=128, writer=None):
+    def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=128, writer=None):
 
         self.total_it += 1
 
@@ -250,21 +250,21 @@ class PAR(object):
         if self.total_it % 200 == 0:
             tar_s, tar_a, tar_ns, _, _ = tar_replay_buffer.sample(batch_size // 2)
             self.update_encoder(tar_s, tar_a, tar_ns, writer)
-        
+
         # derive representation deviation
         with torch.no_grad():
             next_src_zs = self.encoder_target.zs(src_next_state)
             src_zs = self.encoder_target.zs(src_state)
             pred_src_zs = self.encoder_target.zsa(src_zs, src_action)
-            
+
             distance = ((pred_src_zs - next_src_zs)**2).mean(dim=-1, keepdim=True)
-        
+
         src_reward -= self.config['beta'] * distance
 
         if writer is not None and self.total_it % 5000 == 0:
             writer.add_scalar('train/distance', distance.mean(), self.total_it)
             writer.add_scalar('train/src reward', src_reward.mean(), self.total_it)
-        
+
 
         state = torch.cat([src_state, tar_state], 0)
         action = torch.cat([src_action, tar_action], 0)
