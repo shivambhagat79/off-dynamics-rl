@@ -3,10 +3,10 @@
 def call_algo(algo_name, config, mode, device):
     if mode == -1:
         algo_name = algo_name.lower()
-        assert algo_name == 'sac'
+        assert algo_name == 'sac_target_only'
         # online learning on target env for baseline
-        from online_online.sac import SAC
-        policy = SAC(config, device)
+        from online_online.sac_target_only import SAC_Target_Only
+        policy = SAC_Target_Only(config, device)
     elif mode == 0:
         algo_name = algo_name.lower()
         assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty', 'larc']

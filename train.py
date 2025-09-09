@@ -63,7 +63,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.train_on_target_only:
-        args.policy = 'SAC'
+        args.policy = 'SAC_Target_Only'
         args.mode = -1 # special mode for target only training
 
     # we support different ways of specifying tasks, e.g., hopper-friction, hopper_friction, hopper_morph_torso_easy, hopper-morph-torso-easy
@@ -384,13 +384,13 @@ if __name__ == "__main__":
             tar_state = tar_next_state
             tar_episode_reward += tar_reward
 
-            policy.train(src_replay_buffer, tar_replay_buffer, None, config['batch_size'], writer)
+            policy.train(tar_replay_buffer, config['batch_size'], writer)
 
             if tar_done:
                 print(f"Total T: {t+1} Target-only Episode Num: {tar_episode_num+1} Episode T: {tar_episode_timesteps} Reward: {tar_episode_reward:.3f}")
-                writer.add_scalar('train/target_only_return', tar_episode_reward, global_step = t+1)
+                writer.add_scalar('train/target_return', tar_episode_reward, global_step = t+1)
                 train_normalized_score = get_normalized_score(tar_episode_reward, ref_env_name)
-                writer.add_scalar('train/target_only_normalized_score', train_normalized_score, global_step = t+1)
+                writer.add_scalar('train/target_normalized_score', train_normalized_score, global_step = t+1)
 
                 tar_state, tar_done = tar_env.reset(), False
                 tar_episode_reward = 0
@@ -399,9 +399,9 @@ if __name__ == "__main__":
 
             if (t + 1) % config['eval_freq'] == 0:
                 tar_eval_return = eval_policy(policy, tar_eval_env, eval_cnt=eval_cnt)
-                writer.add_scalar('test/target_only_return', tar_eval_return, global_step = t+1)
+                writer.add_scalar('test/target_return', tar_eval_return, global_step = t+1)
                 eval_normalized_score = get_normalized_score(tar_eval_return, ref_env_name)
-                writer.add_scalar('test/target_only_normalized_score', eval_normalized_score, global_step = t+1)
+                writer.add_scalar('test/target_normalized_score', eval_normalized_score, global_step = t+1)
 
                 eval_cnt += 1
 
