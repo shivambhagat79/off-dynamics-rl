@@ -116,18 +116,16 @@ class LARC(object):
         self.target_entropy = target_entropy if target_entropy else -config['action_dim']
         self.total_it = 0
 
-        # Main policy and Q-functions (for DARC on source env)
+        # Main policy and Q-functions (for DARC)
         self.policy = Policy(config['state_dim'], config['action_dim'], config['max_action'], hidden_size=config['hidden_sizes']).to(self.device)
         self.q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
         self.target_q_funcs = copy.deepcopy(self.q_funcs)
         self.target_q_funcs.eval()
+        for p in self.target_q_funcs.parameters():
+            p.requires_grad = False
 
-        # *** IMPROVEMENT 1: Decoupled Q-functions for exploratory policy ***
-        # Exploratory policy and its own Q-functions (for LIBERTY on target env)
+        # Exploratory policy (for LIBERTY)
         self.explore_policy = Policy(config['state_dim'], config['action_dim'], config['max_action'], hidden_size=config['hidden_sizes']).to(self.device)
-        self.explore_q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
-        self.explore_target_q_funcs = copy.deepcopy(self.explore_q_funcs)
-        self.explore_target_q_funcs.eval()
 
         if config['temperature_opt']:
             self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
@@ -144,35 +142,27 @@ class LARC(object):
 
         # Optimizers
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=config['actor_lr'])
-        self.q_optimizer = torch.optim.Adam(self.q_funcs.parameters(), lr=config['critic_lr'])
-
         self.explore_policy_optimizer = torch.optim.Adam(self.explore_policy.parameters(), lr=config['actor_lr'])
-        self.explore_q_optimizer = torch.optim.Adam(self.explore_q_funcs.parameters(), lr=config['critic_lr'])
-
+        self.q_optimizer = torch.optim.Adam(self.q_funcs.parameters(), lr=config['critic_lr'])
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=config['actor_lr'])
         self.metric_optimizer = torch.optim.Adam(self.metric_model.parameters(), lr=config['liberty_lr'])
         self.dynamics_optimizer = torch.optim.Adam(list(self.inverse_model.parameters()) + list(self.forward_model.parameters()), lr=config['liberty_lr'])
 
-        # Hyperparameters for improvements
-        self.intrinsic_reward_coef = config.get('intrinsic_reward_coef', 0.01)
+        self.intrinsic_reward_coef = config.get('intrinsic_reward_coef', 0.1)
         self.target_policy_train_ratio = config.get('target_policy_train_ratio', 10)
-        # *** IMPROVEMENT 2: Frequency for updating auxiliary models ***
-        self.aux_update_freq = config.get('aux_update_freq', 2)
 
 
     def select_action(self, state, test=True, explore=False):
-        policy_to_use = self.explore_policy if explore and not test else self.policy
+        policy = self.explore_policy if explore and not test else self.policy
         with torch.no_grad():
-            action, _, mean = policy_to_use(torch.Tensor(state).view(1, -1).to(self.device))
-
+            action, _, mean = policy(torch.Tensor(state).view(1, -1).to(self.device))
         if test:
             return mean.squeeze().cpu().numpy()
         else:
             return action.squeeze().cpu().numpy()
 
     def update_classifier(self, src_replay_buffer, tar_replay_buffer, batch_size, writer=None):
-        # This function remains largely the same
         src_state, src_action, src_next_state, _, _ = src_replay_buffer.sample(batch_size)
         tar_state, tar_action, tar_next_state, _, _ = tar_replay_buffer.sample(batch_size)
 
@@ -185,19 +175,19 @@ class LARC(object):
         state_batch, action_batch, nextstate_batch, label = state[indices], action[indices], next_state[indices], label[indices]
 
         sas_logits, sa_logits = self.classifier(state_batch, action_batch, nextstate_batch, with_noise=True)
-        loss = F.cross_entropy(sas_logits, label) + F.cross_entropy(sa_logits, label)
+        loss_sas = F.cross_entropy(sas_logits, label)
+        loss_sa = F.cross_entropy(sa_logits, label)
+        classifier_loss = loss_sas + loss_sa
 
         self.classifier_optimizer.zero_grad()
-        loss.backward()
+        classifier_loss.backward()
         self.classifier_optimizer.step()
 
-        if writer is not None and self.total_it % 1000 == 0:
-            writer.add_scalar('train/classifier_loss', loss.item(), self.total_it)
+        if writer is not None and self.total_it % 5000 == 0:
+            writer.add_scalar('train/classifier_loss', classifier_loss.item(), self.total_it)
 
-    def update_liberty_dynamics(self, tar_replay_buffer, batch_size, writer=None):
-        # Update dynamics models (Forward and Inverse)
-        state, action, next_state, _, _ = tar_replay_buffer.sample(batch_size)
-
+    def _update_liberty_models(self, state, action, reward, next_state, writer):
+        # Update dynamics models
         pred_action = self.inverse_model(state, next_state)
         inverse_loss = F.mse_loss(pred_action, action)
         pred_next_state_mu, pred_next_state_std = self.forward_model(state, action)
@@ -208,18 +198,37 @@ class LARC(object):
         dynamics_loss.backward()
         self.dynamics_optimizer.step()
 
+        # Update metric model
+        perm = torch.randperm(state.size(0))
+        state_p, action_p, reward_p, next_state_p = state[perm], action[perm], reward[perm], next_state[perm]
+
+        with torch.no_grad():
+            r_dist = F.mse_loss(reward, reward_p, reduction='none')
+            pred_mu, pred_std = self.forward_model(state, action)
+            pred_mu_p, pred_std_p = self.forward_model(state_p, action_p)
+            w2_dist_sq = F.mse_loss(pred_mu, pred_mu_p, reduction='none').sum(dim=-1, keepdim=True) + \
+                         F.mse_loss(pred_std, pred_std_p, reduction='none').sum(dim=-1, keepdim=True)
+            w2_dist = torch.sqrt(w2_dist_sq + 1e-6)
+            pred_a = self.inverse_model(state, next_state)
+            pred_a_p = self.inverse_model(state_p, next_state_p)
+            inv_dist = F.l1_loss(pred_a, pred_a_p, reduction='none').sum(dim=-1, keepdim=True)
+            target_metric = r_dist + self.discount * w2_dist + self.discount * inv_dist
+
+        predicted_metric = self.metric_model(state, state_p)
+        metric_loss = F.mse_loss(predicted_metric, target_metric)
+
+        self.metric_optimizer.zero_grad()
+        metric_loss.backward()
+        self.metric_optimizer.step()
+
         if writer is not None and self.total_it % 1000 == 0:
             writer.add_scalar('liberty/dynamics_loss', dynamics_loss.item(), self.total_it)
+            writer.add_scalar('liberty/metric_loss', metric_loss.item(), self.total_it)
 
-    def update_target_networks(self, main_net=True, explore_net=True):
-        if main_net:
-            with torch.no_grad():
-                for target_q_param, q_param in zip(self.target_q_funcs.parameters(), self.q_funcs.parameters()):
-                    target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
-        if explore_net:
-            with torch.no_grad():
-                for target_q_param, q_param in zip(self.explore_target_q_funcs.parameters(), self.explore_q_funcs.parameters()):
-                    target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
+    def update_target_q_functions(self):
+        with torch.no_grad():
+            for target_q_param, q_param in zip(self.target_q_funcs.parameters(), self.q_funcs.parameters()):
+                target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
 
     def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=256, writer=None):
         self.total_it += 1
@@ -227,20 +236,18 @@ class LARC(object):
         if src_replay_buffer.size < batch_size or tar_replay_buffer.size < batch_size:
             return
 
-        # --- Train Source (Main) Policy with DARC ---
+        # --- Train Source Policy with DARC ---
         src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(batch_size)
 
         if self.total_it > self.config.get('darc_warmup_steps', 10000):
-            if self.total_it % self.aux_update_freq == 0:
-                self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
-
+            self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
             with torch.no_grad():
                 sas_probs, sa_probs = self.classifier(src_state, src_action, src_next_state, with_noise=False)
                 reward_penalty = (torch.log(sas_probs[:, 1:] + 1e-8) - torch.log(sa_probs[:, 1:] + 1e-8)) - \
                                  (torch.log(sas_probs[:, :1] + 1e-8) - torch.log(sa_probs[:, :1] + 1e-8))
                 src_reward += self.config['penalty_coefficient'] * reward_penalty
 
-        # Q-function update for main policy
+        # Q-function update for source
         with torch.no_grad():
             next_action, log_prob, _ = self.policy(src_next_state, get_logprob=True)
             target_q1, target_q2 = self.target_q_funcs(src_next_state, next_action)
@@ -257,70 +264,45 @@ class LARC(object):
         # Main policy and temperature update
         for p in self.q_funcs.parameters(): p.requires_grad = False
         action, log_prob, _ = self.policy(src_state, get_logprob=True)
-        q1_pi, q2_pi = self.q_funcs(src_state, action)
-        q_pi = torch.min(q1_pi, q2_pi)
+        q1, q2 = self.q_funcs(src_state, action)
+        q_pi = torch.min(q1, q2)
         policy_loss = (self.alpha * log_prob - q_pi).mean()
 
         self.policy_optimizer.zero_grad()
         policy_loss.backward()
         self.policy_optimizer.step()
-        for p in self.q_funcs.parameters(): p.requires_grad = True
 
         if self.config['temperature_opt']:
-            # Temperature is shared, updated based on main policy's entropy
             temp_loss = -self.alpha * (log_prob.detach() + self.target_entropy).mean()
             self.temp_optimizer.zero_grad()
             temp_loss.backward()
             self.temp_optimizer.step()
 
-        self.update_target_networks(main_net=True, explore_net=False)
+        for p in self.q_funcs.parameters(): p.requires_grad = True
+
+        self.update_target_q_functions()
 
         # --- Train Target (Exploratory) Policy with LIBERTY ---
-        # Delayed update for liberty dynamics models
-        if self.total_it % self.aux_update_freq == 0:
-            self.update_liberty_dynamics(tar_replay_buffer, batch_size, writer)
-
         for _ in range(self.target_policy_train_ratio):
-            tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
+            tar_state, tar_action, tar_next_state, tar_reward, _ = tar_replay_buffer.sample(batch_size)
+            self._update_liberty_models(tar_state, tar_action, tar_reward, tar_next_state, writer)
 
-            # Update metric model (needs to be fast to guide policy)
-            perm = torch.randperm(tar_state.size(0))
-            state_p, reward_p = tar_state[perm], tar_reward[perm]
-            with torch.no_grad():
-                r_dist = F.mse_loss(tar_reward, reward_p, reduction='none')
-            predicted_metric = self.metric_model(tar_state, state_p) # Simplified for speed
-            metric_loss = F.mse_loss(predicted_metric, r_dist)
-            self.metric_optimizer.zero_grad(); metric_loss.backward(); self.metric_optimizer.step()
-
-            # Q-function update for exploratory policy
             with torch.no_grad():
                 initial_state_batch = torch.Tensor(initial_state).expand_as(tar_state).to(self.device)
-                potential_s_next = self.metric_model(tar_next_state, initial_state_batch)
                 potential_s = self.metric_model(tar_state, initial_state_batch)
+                potential_s_next = self.metric_model(tar_next_state, initial_state_batch)
                 intrinsic_reward = self.discount * potential_s_next - potential_s
 
-                next_explore_action, next_log_prob, _ = self.explore_policy(tar_next_state, get_logprob=True)
-                exp_target_q1, exp_target_q2 = self.explore_target_q_funcs(tar_next_state, next_explore_action)
-                exp_target_q = torch.min(exp_target_q1, exp_target_q2) - self.alpha.detach() * next_log_prob
-                total_reward = tar_reward + self.intrinsic_reward_coef * intrinsic_reward
-                exp_target_q = total_reward + tar_not_done * self.discount * exp_target_q
+            explore_action, explore_log_prob, _ = self.explore_policy(tar_state, get_logprob=True)
+            q1_exp, q2_exp = self.q_funcs(tar_state, explore_action)
+            q_pi_exp = torch.min(q1_exp, q2_exp)
 
-            exp_current_q1, exp_current_q2 = self.explore_q_funcs(tar_state, tar_action)
-            exp_q_loss = F.mse_loss(exp_current_q1, exp_target_q) + F.mse_loss(exp_current_q2, exp_target_q)
+            explore_policy_loss = (self.alpha * explore_log_prob - q_pi_exp - self.intrinsic_reward_coef * intrinsic_reward).mean()
 
-            self.explore_q_optimizer.zero_grad(); exp_q_loss.backward(); self.explore_q_optimizer.step()
+            self.explore_policy_optimizer.zero_grad()
+            explore_policy_loss.backward()
+            self.explore_policy_optimizer.step()
 
-            # Exploratory policy update
-            for p in self.explore_q_funcs.parameters(): p.requires_grad = False
-            explore_action, log_prob, _ = self.explore_policy(tar_state, get_logprob=True)
-            exp_q1, exp_q2 = self.explore_q_funcs(tar_state, explore_action)
-            exp_q_pi = torch.min(exp_q1, exp_q2)
-            explore_policy_loss = (self.alpha.detach() * log_prob - exp_q_pi).mean()
-
-            self.explore_policy_optimizer.zero_grad(); explore_policy_loss.backward(); self.explore_policy_optimizer.step()
-            for p in self.explore_q_funcs.parameters(): p.requires_grad = True
-
-        self.update_target_networks(main_net=False, explore_net=True)
 
     @property
     def alpha(self):
@@ -328,17 +310,19 @@ class LARC(object):
 
     def save(self, filename):
         torch.save(self.policy.state_dict(), filename + "_main_policy")
-        torch.save(self.q_funcs.state_dict(), filename + "_main_critic")
         torch.save(self.explore_policy.state_dict(), filename + "_explore_policy")
-        torch.save(self.explore_q_funcs.state_dict(), filename + "_explore_critic")
-        # ... save other components if needed
+        torch.save(self.q_funcs.state_dict(), filename + "_critic")
+        torch.save(self.classifier.state_dict(), filename + "_classifier")
+        torch.save(self.metric_model.state_dict(), filename + "_metric_model")
+        torch.save(self.inverse_model.state_dict(), filename + "_inverse_model")
+        torch.save(self.forward_model.state_dict(), filename + "_forward_model")
 
     def load(self, filename):
         self.policy.load_state_dict(torch.load(filename + "_main_policy"))
-        self.q_funcs.load_state_dict(torch.load(filename + "_main_critic"))
-        self.target_q_funcs = copy.deepcopy(self.q_funcs)
         self.explore_policy.load_state_dict(torch.load(filename + "_explore_policy"))
-        self.explore_q_funcs.load_state_dict(torch.load(filename + "_explore_critic"))
-        self.explore_target_q_funcs = copy.deepcopy(self.explore_q_funcs)
-        # ... load other components
-
+        self.q_funcs.load_state_dict(torch.load(filename + "_critic"))
+        self.target_q_funcs = copy.deepcopy(self.q_funcs)
+        self.classifier.load_state_dict(torch.load(filename + "_classifier"))
+        self.metric_model.load_state_dict(torch.load(filename + "_metric_model"))
+        self.inverse_model.load_state_dict(torch.load(filename + "_inverse_model"))
+        self.forward_model.load_state_dict(torch.load(filename + "_forward_model"))

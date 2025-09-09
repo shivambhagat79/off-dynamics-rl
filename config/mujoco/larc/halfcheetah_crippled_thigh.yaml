@@ -4,8 +4,8 @@ actor_lr: 0.0003
 critic_lr: 0.0003
 gamma: 0.99
 
-liberty_lr: 0.0003
-intrinsic_reward_coef: 0.1
+liberty_lr: 0.001
+intrinsic_reward_coef: 1.0
 
 state_dim: 17
 action_dim: 3
