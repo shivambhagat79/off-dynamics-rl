@@ -281,9 +281,9 @@ class DARC(object):
 
         self.total_it += 1
 
-        # --- 1. Train Transfer Policy on Source Data (Original DARC logic) ---
+        # --- 1. Update Critics ---
+        # Update transfer critic on source data
         if src_replay_buffer.size >= 2 * batch_size:
-            # DARC warmup and reward modification logic
             if self.total_it <= int(1e5):
                 src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(2 * batch_size)
             else:
@@ -297,15 +297,33 @@ class DARC(object):
                     if writer is not None and self.total_it % 5000 == 0:
                         writer.add_scalar('train/reward penalty', reward_penalty.mean(), global_step=self.total_it)
                     src_reward += self.config['penalty_coefficient'] * reward_penalty
-
-            # Standard SAC update for the transfer policy
+            
             q_loss_step = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
             self.q_optimizer.zero_grad()
             q_loss_step.backward()
             self.q_optimizer.step()
 
-            for p in self.q_funcs.parameters():
-                p.requires_grad = False
+        # Update exploratory critic on target data
+        if tar_replay_buffer.size >= batch_size:
+            tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
+            expl_q_loss_step = self.update_exploratory_q_functions(tar_state, tar_action, tar_reward, tar_next_state, tar_not_done)
+            self.exploratory_q_optimizer.zero_grad()
+            expl_q_loss_step.backward()
+            self.exploratory_q_optimizer.step()
+
+        # --- 2. Freeze Critics and Update Policies ---
+        # Freeze both critics to avoid gradient conflicts during policy updates
+        for p in self.q_funcs.parameters():
+            p.requires_grad = False
+        for p in self.exploratory_q_funcs.parameters():
+            p.requires_grad = False
+
+        # Update transfer policy on source data
+        if src_replay_buffer.size >= 2 * batch_size:
+            # We need to sample src_state again as it might not be available if the first block was skipped
+            # This is slightly inefficient but ensures correctness.
+            if 'src_state' not in locals():
+                 src_state, _, _, _, _ = src_replay_buffer.sample(2 * batch_size)
             pi_loss_step, a_loss_step = self.update_policy_and_temp(src_state)
             self.policy_optimizer.zero_grad()
             pi_loss_step.backward()
@@ -314,21 +332,12 @@ class DARC(object):
                 self.temp_optimizer.zero_grad()
                 a_loss_step.backward()
                 self.temp_optimizer.step()
-            for p in self.q_funcs.parameters():
-                p.requires_grad = True
 
-        # --- 2. Train Exploratory Policy on Target Data (New logic) ---
+        # Update exploratory policy on target data
         if tar_replay_buffer.size >= batch_size:
-            tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
-            
-            # Standard SAC update for the exploratory policy
-            expl_q_loss_step = self.update_exploratory_q_functions(tar_state, tar_action, tar_reward, tar_next_state, tar_not_done)
-            self.exploratory_q_optimizer.zero_grad()
-            expl_q_loss_step.backward()
-            self.exploratory_q_optimizer.step()
-
-            for p in self.exploratory_q_funcs.parameters():
-                p.requires_grad = False
+            # We need to sample tar_state again as it might not be available if the critic update block was skipped
+            if 'tar_state' not in locals():
+                tar_state, _, _, _, _ = tar_replay_buffer.sample(batch_size)
             expl_pi_loss_step, expl_a_loss_step = self.update_exploratory_policy_and_temp(tar_state)
             self.exploratory_policy_optimizer.zero_grad()
             expl_pi_loss_step.backward()
@@ -337,10 +346,15 @@ class DARC(object):
                 self.exploratory_temp_optimizer.zero_grad()
                 expl_a_loss_step.backward()
                 self.exploratory_temp_optimizer.step()
-            for p in self.exploratory_q_funcs.parameters():
-                p.requires_grad = True
 
-        # --- 3. Update Target Networks ---
+        # --- 3. Unfreeze Critics ---
+        # Re-enable gradients for both critics for the next iteration
+        for p in self.q_funcs.parameters():
+            p.requires_grad = True
+        for p in self.exploratory_q_funcs.parameters():
+            p.requires_grad = True
+
+        # --- 4. Update Target Networks ---
         if self.total_it % self.update_interval == 0:
             self.update_target()
 
