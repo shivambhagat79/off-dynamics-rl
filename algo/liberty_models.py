@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 
 class MLPNetwork(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_size=256):
+    def __init__(self, input_dim, output_dim, hidden_size=256, activation=nn.ReLU):
         super(MLPNetwork, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_size),
-            nn.ReLU(),
+            activation(),
             nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
+            activation(),
             nn.Linear(hidden_size, output_dim),
         )
 
@@ -37,7 +37,7 @@ class InverseDynamicsModel(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_size=256):
         super(InverseDynamicsModel, self).__init__()
         # Input is two concatenated states
-        self.network = MLPNetwork(state_dim * 2, action_dim, hidden_size)
+        self.network = MLPNetwork(state_dim * 2, action_dim, hidden_size, activation=nn.LeakyReLU)
 
     def forward(self, state, next_state):
         x = torch.cat([state, next_state], dim=-1)

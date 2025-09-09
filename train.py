@@ -58,8 +58,13 @@ if __name__ == "__main__":
     parser.add_argument('--tar_env_interact_interval', help='interval of interacting with target env', default=10, type=int)
     parser.add_argument('--max_step', default=int(1e6), type=int)  # the maximum gradient step for off-dynamics rl learning
     parser.add_argument('--params', default=None, help='Hyperparameters for the adopted algorithm, ought to be in JSON format')
+    parser.add_argument('--train_on_target_only', action='store_true', help='Train SAC exclusively on the target environment for baseline.')
 
     args = parser.parse_args()
+
+    if args.train_on_target_only:
+        args.policy = 'SAC'
+        args.mode = -1 # special mode for target only training
 
     # we support different ways of specifying tasks, e.g., hopper-friction, hopper_friction, hopper_morph_torso_easy, hopper-morph-torso-easy
     if '_' in args.env:
@@ -146,7 +151,7 @@ if __name__ == "__main__":
         tar_eval_env = call_env[domain](tar_env_config)
         tar_eval_env.seed(args.seed + 100)
 
-    if args.mode not in [0,1,2,3]:
+    if args.mode not in [-1, 0, 1, 2, 3]:
         raise NotImplementedError # cannot support other modes
 
     policy_config_name = args.policy.lower()
@@ -171,7 +176,9 @@ if __name__ == "__main__":
     print("------------------------------------------------------------")
 
     # log path, we use logging with tensorboard
-    if args.mode == 1:
+    if args.train_on_target_only:
+        outdir = args.dir + '/' + args.policy + '/' + args.env + '-' + str(args.shift_level) + '/baseline_r' + str(args.seed)
+    elif args.mode == 1:
         outdir = args.dir + '/' + args.policy + '/' + args.env + '-srcdatatype-' + args.srctype + '-' + str(args.shift_level) + '/r' + str(args.seed)
     elif args.mode == 2:
         outdir = args.dir + '/' + args.policy + '/' + args.env + '-tardatatype-' + args.tartype + '-' + str(args.shift_level) + '/r' + str(args.seed)
@@ -224,7 +231,7 @@ if __name__ == "__main__":
     policy = call_algo(args.policy, config, args.mode, device)
 
     # Initialize KMeansStateNovelty if in an online mode with target interaction
-    if args.mode == 0 or args.mode == 1:
+    if (args.mode == 0 or args.mode == 1) and not args.train_on_target_only:
         kmeans_state_novelty = utils.KMeansStateNovelty(state_dim)
 
     ## write logs to record training parameters
@@ -349,6 +356,52 @@ if __name__ == "__main__":
                 writer.add_scalar('test/target return', tar_eval_return, global_step = t+1)
                 eval_normalized_score = get_normalized_score(tar_eval_return, ref_env_name)
                 writer.add_scalar('test/target normalized score', eval_normalized_score, global_step = t+1)
+
+                eval_cnt += 1
+
+                if args.save_model:
+                    policy.save('{}/models/model'.format(outdir))
+    elif args.train_on_target_only:
+        # online learning on target env only for baseline
+        tar_state, tar_done = tar_env.reset(), False
+        tar_episode_reward, tar_episode_timesteps, tar_episode_num = 0, 0, 0
+
+        for t in range(int(config['max_step'])):
+            tar_episode_timesteps += 1
+
+            tar_action = (
+                policy.select_action(np.array(tar_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
+            ).clip(-max_action, max_action)
+
+            tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
+            tar_done_bool = float(tar_done) if tar_episode_timesteps < tar_env._max_episode_steps else 0
+
+            if 'antmaze' in args.env:
+                tar_reward -= 1.0
+
+            tar_replay_buffer.add(tar_state, tar_action, tar_next_state, tar_reward, tar_done_bool)
+
+            tar_state = tar_next_state
+            tar_episode_reward += tar_reward
+
+            policy.train(src_replay_buffer, tar_replay_buffer, None, config['batch_size'], writer)
+
+            if tar_done:
+                print(f"Total T: {t+1} Target-only Episode Num: {tar_episode_num+1} Episode T: {tar_episode_timesteps} Reward: {tar_episode_reward:.3f}")
+                writer.add_scalar('train/target_only_return', tar_episode_reward, global_step = t+1)
+                train_normalized_score = get_normalized_score(tar_episode_reward, ref_env_name)
+                writer.add_scalar('train/target_only_normalized_score', train_normalized_score, global_step = t+1)
+
+                tar_state, tar_done = tar_env.reset(), False
+                tar_episode_reward = 0
+                tar_episode_timesteps = 0
+                tar_episode_num += 1
+
+            if (t + 1) % config['eval_freq'] == 0:
+                tar_eval_return = eval_policy(policy, tar_eval_env, eval_cnt=eval_cnt)
+                writer.add_scalar('test/target_only_return', tar_eval_return, global_step = t+1)
+                eval_normalized_score = get_normalized_score(tar_eval_return, ref_env_name)
+                writer.add_scalar('test/target_only_normalized_score', eval_normalized_score, global_step = t+1)
 
                 eval_cnt += 1
 

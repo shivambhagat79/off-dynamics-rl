@@ -1,9 +1,15 @@
 # import all algorithms this benchmark implement
 
 def call_algo(algo_name, config, mode, device):
-    if mode == 0:
+    if mode == -1:
         algo_name = algo_name.lower()
-        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty']
+        assert algo_name == 'sac'
+        # online learning on target env for baseline
+        from online_online.sac import SAC
+        policy = SAC(config, device)
+    elif mode == 0:
+        algo_name = algo_name.lower()
+        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty', 'larc']
         # online online setting
         from online_online.darc import DARC
         from online_online.sac import SAC
@@ -12,6 +18,7 @@ def call_algo(algo_name, config, mode, device):
         from online_online.par import PAR
         from online_online.sac_liberty import SAC_LIBERTY
         from online_online.darc_liberty import DARC_LIBERTY
+        from online_online.larc import LARC
 
         algo_to_call = {
             'sac': SAC,
@@ -21,6 +28,7 @@ def call_algo(algo_name, config, mode, device):
             'par': PAR,
             'sac_liberty': SAC_LIBERTY,
             'darc_liberty': DARC_LIBERTY,
+            'larc': LARC,
         }
 
         algo = algo_to_call[algo_name]
