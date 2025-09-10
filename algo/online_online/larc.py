@@ -158,7 +158,7 @@ class LARC(object):
         self.intrinsic_reward_coef = config.get('intrinsic_reward_coef', 0.01)
         self.target_policy_train_ratio = config.get('target_policy_train_ratio', 10)
         # *** IMPROVEMENT 2: Frequency for updating auxiliary models ***
-        self.aux_update_freq = config.get('aux_update_freq', 2)
+        self.aux_update_freq = config.get('aux_update_freq', 5)
 
 
     def select_action(self, state, test=True, explore=False):
