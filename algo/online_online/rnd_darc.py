@@ -373,7 +373,7 @@ class DARC(object):
             writer.add_scalar('train/q1', q_1.mean(), self.total_it)
             writer.add_scalar('train/logprob', logprobs_batch.mean(), self.total_it)
         loss = F.mse_loss(q_1, value_target) + F.mse_loss(q_2, value_target)
-        return loss
+        return loss, q_target
 
     def update_policy_and_temp(self, state_batch):
         action_batch, logprobs_batch, _ = self.policy(state_batch, get_logprob=True)
@@ -420,29 +420,99 @@ class DARC(object):
                             iters=self.config['rnd_src_steps_per_iter'],
                             batch_size=self.config.get('rnd_batch_size', batch_size))
 
-        q_loss_step = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
+        q_loss_step, q_target = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
 
         self.q_optimizer.zero_grad()
         q_loss_step.backward()
         self.q_optimizer.step()
 
-        self.update_target()
-
-        # update policy and temperature parameter
+        # update policy and temperature
         for p in self.q_funcs.parameters():
             p.requires_grad = False
-        pi_loss_step, a_loss_step = self.update_policy_and_temp(src_state)
-        self.policy_optimizer.zero_grad()
+        pi_loss_step, alpha_loss_step = self.update_policy_and_temp(src_state)
+        self.pi_optimizer.zero_grad()
         pi_loss_step.backward()
-        self.policy_optimizer.step()
-
-        if self.config['temperature_opt']:
-            self.temp_optimizer.zero_grad()
-            a_loss_step.backward()
-            self.temp_optimizer.step()
-
+        self.pi_optimizer.step()
+        self.temp_optimizer.zero_grad()
+        alpha_loss_step.backward()
+        self.temp_optimizer.step()
         for p in self.q_funcs.parameters():
             p.requires_grad = True
+
+        # update classifier
+        if self.warm_up_step < self.current_step:
+            for _ in range(self.update_rate):
+                s, a, s2, r_env, not_done = src_replay_buffer.sample(batch_size)
+
+                # Intrinsic bonus (vs-source) and mixed reward for explorer
+                r_int = self._intrinsic_bonus(s, a, s2)
+                r = r_env + self.exp_beta * r_int
+
+                # --- Q update ---
+                with torch.no_grad():
+                    an, logp, _ = self.exp_policy(s2, get_logprob=True)
+                    q1t, q2t = self.exp_target_q_funcs(s2, an)
+                    q_t = torch.min(q1t, q2t)
+                    target = r + not_done * self.discount * (q_t - self._exp_alpha * logp)
+
+                q1, q2 = self.exp_q_funcs(s, a)
+                q_loss = F.mse_loss(q1, target) + F.mse_loss(q2, target)
+                self.exp_q_optimizer.zero_grad()
+                q_loss.backward()
+                self.exp_q_optimizer.step()
+
+                # soft update explorer target critics
+                self._update_target_net(self.exp_target_q_funcs, self.exp_q_funcs)
+
+                # --- policy + temperature updates ---
+                for p in self.exp_q_funcs.parameters(): p.requires_grad = False
+                ap, logp, _ = self.exp_policy(s, get_logprob=True)
+                q1b, q2b = self.exp_q_funcs(s, ap)
+                qv = torch.min(q1b, q2b)
+                pi_loss = (self._exp_alpha * logp - qv).mean()
+                self.exp_policy_optimizer.zero_grad()
+                pi_loss.backward()
+                self.exp_policy_optimizer.step()
+                for p in self.exp_q_funcs.parameters(): p.requires_grad = True
+
+                if self.config.get('exp_temperature_opt', True):
+                    temp_loss = -self._exp_alpha * (logp.detach() + (-self.config['action_dim'])).mean()
+                    self.exp_temp_optimizer.zero_grad()
+                    temp_loss.backward()
+                    self.exp_temp_optimizer.step()
+
+                source_logits, _ = self.classifier.sa_classifier(s)
+                target_logits, _ = self.classifier.sas_classifier(torch.cat([s, a, s2], dim=1))
+
+                # Compute the source and target domain losses
+                source_loss = F.binary_cross_entropy_with_logits(source_logits, torch.zeros_like(source_logits))
+                target_loss = F.binary_cross_entropy_with_logits(target_logits, torch.ones_like(target_logits))
+                classifier_loss = source_loss + target_loss
+
+                self.classifier_optimizer.zero_grad()
+                classifier_loss.backward()
+                self.classifier_optimizer.step()
+
+                source_acc = (torch.sigmoid(source_logits) < 0.5).float().mean()
+                target_acc = (torch.sigmoid(target_logits) > 0.5).float().mean()
+
+        if self.current_step % 1000 == 0:
+            writer.add_scalar('train/batch_reward', src_reward.mean(), self.current_step)
+            writer.add_scalar('train/q_target', q_target.mean(), self.current_step)
+            writer.add_scalar('train/critic_loss', q_loss_step.item(), self.current_step)
+            writer.add_scalar('train/actor_loss', pi_loss_step.item(), self.current_step)
+            writer.add_scalar('train/alpha', self.alpha, self.current_step)
+            writer.add_scalar('train/alpha_loss', alpha_loss_step.item(), self.current_step)
+            if self.warm_up_step < self.current_step:
+                writer.add_scalar('classifier/loss', classifier_loss.item(), self.current_step)
+                writer.add_scalar('classifier/source_acc', source_acc.item(), self.current_step)
+                writer.add_scalar('classifier/target_acc', target_acc.item(), self.current_step)
+                if 'reward_penalty' in locals():
+                    writer.add_scalar('classifier/reward_penalty', reward_penalty.mean().item(), self.current_step)
+
+        self.current_step += 1
+        self.update_target()
+        # ...existing code...
 
     @property
     def alpha(self):

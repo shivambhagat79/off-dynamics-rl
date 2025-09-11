@@ -3,13 +3,14 @@
 def call_algo(algo_name, config, mode, device):
     if mode == 0:
         algo_name = algo_name.lower()
-        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par']
+        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'rnd_darc']
         # online online setting
         from online_online.darc import DARC
         from online_online.sac import SAC
         from online_online.vgdf import VGDF
         from online_online.sac_iw import SAC_IW
         from online_online.par import PAR
+        from online_online.rnd_darc import DARC as RNDDARC
 
         algo_to_call = {
             'sac': SAC,
@@ -17,6 +18,7 @@ def call_algo(algo_name, config, mode, device):
             'vgdf': VGDF,
             'sac_iw': SAC_IW,
             'par': PAR,
+            'rnd_darc': RNDDARC,
         }
 
         algo = algo_to_call[algo_name]
