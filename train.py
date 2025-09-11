@@ -11,6 +11,7 @@ import yaml
 import json # in case the user want to modify the hyperparameters
 import d4rl # used to make offline environments for source domains
 import algo.utils as utils
+import setproctitle
 
 from pathlib                              import Path
 from algo.call_algo                       import call_algo
@@ -61,6 +62,9 @@ if __name__ == "__main__":
     parser.add_argument('--train_on_target_only', action='store_true', help='Train SAC exclusively on the target environment for baseline.')
 
     args = parser.parse_args()
+
+    # Set process title
+    setproctitle.setproctitle(f"{args.policy}-{args.env}")
 
     if args.train_on_target_only:
         args.policy = 'SAC_Target_Only'
