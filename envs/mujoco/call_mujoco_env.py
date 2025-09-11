@@ -65,6 +65,11 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
                 HalfCheetahEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
                 max_episode_steps=1000          
             )
+        elif 'crippled' in env_name:
+            return TimeLimit(
+                HalfCheetahEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/halfcheetah_crippled_thigh.xml",),
+                max_episode_steps=1000
+            )
         else:
             print("env_name {env_name} is illegal or not implemented")
             raise NotImplementedError
