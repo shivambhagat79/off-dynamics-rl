@@ -282,7 +282,12 @@ if __name__ == "__main__":
             if t % config['tar_env_interact_interval'] == 0:
                 tar_steps += 1
                 tar_episode_timesteps += 1
-                tar_action = policy.select_action_explorer(np.array(tar_state), test=False)
+                if args.policy == 'rnd_darc':
+                    tar_action = policy.select_action_explorer(np.array(tar_state), test=False)
+                else:
+                    tar_action = (
+                        policy.select_action(np.array(tar_state), test=False) + np.random.normal(0, max_action * 0.2, size=action_dim)
+                    ).clip(-max_action, max_action)
 
 
                 tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
@@ -297,11 +302,12 @@ if __name__ == "__main__":
 
                 tar_replay_buffer.add(tar_state, tar_action, tar_next_state, tar_reward, tar_done_bool)
                 
-                policy.explorer_update(
-                    tar_replay_buffer,
-                    batch_size=config['batch_size'],
-                    writer=writer
-                )
+                if args.policy == 'rnd_darc':
+                    policy.explorer_update(
+                        tar_replay_buffer,
+                        batch_size=config['batch_size'],
+                        writer=writer
+                    )
 
                 tar_state = tar_next_state
                 tar_episode_reward += tar_reward
