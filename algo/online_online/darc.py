@@ -137,6 +137,8 @@ class DARC(object):
         self.tau = config['tau']
         self.target_entropy = target_entropy if target_entropy else -config['action_dim']
         self.update_interval = config['update_interval']
+        self.rnd_src_steps_per_iter = config['rnd_src_steps_per_iter']
+        self.rnd_batch_size = config['rnd_batch_size']
 
         self.total_it = 0
 
@@ -163,6 +165,51 @@ class DARC(object):
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=config['actor_lr'])
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=config['actor_lr'])
+
+        # === Explorer SAC (target-only) ===
+        self.exp_q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.exp_target_q_funcs = copy.deepcopy(self.exp_q_funcs)
+        for p in self.exp_target_q_funcs.parameters():
+            p.requires_grad = False
+
+        self.exp_policy = Policy(config['state_dim'], config['action_dim'], config['max_action'], hidden_size=config['hidden_sizes']).to(self.device)
+
+        # Separate temperature for explorer
+        if config.get('exp_temperature_opt', True):
+            self.exp_log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+        else:
+            self.exp_log_alpha = torch.log(torch.FloatTensor([0.2])).to(self.device)
+
+        # Optimizers for explorer
+        self.exp_q_optimizer = torch.optim.Adam(self.exp_q_funcs.parameters(), lr=config['critic_lr'])
+        self.exp_policy_optimizer = torch.optim.Adam(self.exp_policy.parameters(), lr=config['actor_lr'])
+        self.exp_temp_optimizer = torch.optim.Adam([self.exp_log_alpha], lr=config['actor_lr'])
+
+        # === Forward-RND (source-aware) ===
+        rnd_hidden = config.get('rnd_hidden', 256)
+        self.rnd_target = MLPNetwork(config['state_dim'], rnd_hidden, hidden_size=rnd_hidden).to(self.device)
+        for p in self.rnd_target.parameters():
+            p.requires_grad = False  # fixed random target
+
+        self.rnd_predictor = MLPNetwork(config['state_dim'] + config['action_dim'], rnd_hidden, hidden_size=rnd_hidden).to(self.device)
+
+        self.rnd_opt = torch.optim.Adam(self.rnd_predictor.parameters(), lr=config.get('rnd_lr', 1e-3))
+        self.rnd_running_mean = torch.zeros(1, device=self.device)
+        self.rnd_running_var  = torch.ones(1, device=self.device)
+        self.rnd_mom = 0.99
+
+        # scale for intrinsic in explorer reward
+        self.exp_beta = float(config.get('exp_beta', 0.1))
+    
+    @property
+    def _exp_alpha(self):
+     return self.exp_log_alpha.exp()
+
+    def _update_target_net(self, target, source):
+        with torch.no_grad():
+            for tp, sp in zip(target.parameters(), source.parameters()):
+                tp.data.copy_(self.tau * sp.data + (1.0 - self.tau) * tp.data)
+
     
     def select_action(self, state, test=True):
         with torch.no_grad():
@@ -199,6 +246,113 @@ class DARC(object):
         if writer is not None and self.total_it % 5000 == 0:
             writer.add_scalar('train/sas classifier loss', loss_sas, global_step=self.total_it)
             writer.add_scalar('train/sa classifier loss', loss_sa, global_step=self.total_it)
+    
+
+    ## rnd training on source samples
+
+    def prefit_rnd_on_source(self, src_replay_buffer, steps=10000, batch_size=256):
+        self.rnd_predictor.train()
+        for _ in range(steps):
+            s, a, s2, _, _ = src_replay_buffer.sample(batch_size)
+            with torch.no_grad():
+                z_t1 = self.rnd_target(s2)  # random embedding of next state
+            pred = self.rnd_predictor(torch.cat([s, a], dim=1))
+            loss = F.mse_loss(pred, z_t1)
+            self.rnd_opt.zero_grad()
+            loss.backward()
+            self.rnd_opt.step()
+
+    
+
+
+    @torch.no_grad()
+    def _intrinsic_bonus(self, s, a, s2):
+        """
+        RND error normalized & clipped. Higher = more unlike source.
+        """
+        z_t1 = self.rnd_target(s2)
+        pred = self.rnd_predictor(torch.cat([s, a], dim=1))
+        err = (pred - z_t1).pow(2).mean(dim=1, keepdim=True)  # [B,1]
+
+        # running normalize
+        m = err.mean()
+        v = err.var(unbiased=False) + 1e-8
+        self.rnd_running_mean = self.rnd_mom * self.rnd_running_mean + (1 - self.rnd_mom) * m
+        self.rnd_running_var  = self.rnd_mom * self.rnd_running_var  + (1 - self.rnd_mom) * v
+        normed = (err - self.rnd_running_mean) / torch.sqrt(self.rnd_running_var + 1e-8)
+        return normed.clamp(min=0.0, max=5.0)
+
+    @torch.no_grad()
+    def select_action_explorer(self, state, test=False):
+        action, _, mean = self.exp_policy(torch.Tensor(state).view(1,-1).to(self.device))
+        return (mean if test else action).squeeze().cpu().numpy()
+
+    
+    def explorer_update(self, tar_replay_buffer, batch_size=256, writer=None):
+        if tar_replay_buffer.size < batch_size:
+            return
+
+        s, a, s2, r_env, not_done = tar_replay_buffer.sample(batch_size)
+
+        # Intrinsic bonus (vs-source) and mixed reward for explorer
+        r_int = self._intrinsic_bonus(s, a, s2)
+        r = r_env + self.exp_beta * r_int
+
+        # --- Q update ---
+        with torch.no_grad():
+            an, logp, _ = self.exp_policy(s2, get_logprob=True)
+            q1t, q2t = self.exp_target_q_funcs(s2, an)
+            q_t = torch.min(q1t, q2t)
+            target = r + not_done * self.discount * (q_t - self._exp_alpha * logp)
+
+        q1, q2 = self.exp_q_funcs(s, a)
+        q_loss = F.mse_loss(q1, target) + F.mse_loss(q2, target)
+        self.exp_q_optimizer.zero_grad()
+        q_loss.backward()
+        self.exp_q_optimizer.step()
+
+        # soft update explorer target critics
+        self._update_target_net(self.exp_target_q_funcs, self.exp_q_funcs)
+
+        # --- policy + temperature updates ---
+        for p in self.exp_q_funcs.parameters(): p.requires_grad = False
+        ap, logp, _ = self.exp_policy(s, get_logprob=True)
+        q1b, q2b = self.exp_q_funcs(s, ap)
+        qv = torch.min(q1b, q2b)
+        pi_loss = (self._exp_alpha * logp - qv).mean()
+        self.exp_policy_optimizer.zero_grad()
+        pi_loss.backward()
+        self.exp_policy_optimizer.step()
+        for p in self.exp_q_funcs.parameters(): p.requires_grad = True
+
+        if self.config.get('exp_temperature_opt', True):
+            temp_loss = -self._exp_alpha * (logp.detach() + (-self.config['action_dim'])).mean()
+            self.exp_temp_optimizer.zero_grad()
+            temp_loss.backward()
+            self.exp_temp_optimizer.step()
+
+        if writer is not None and self.total_it % 5000 == 0:
+            writer.add_scalar('explorer/q_loss', q_loss, self.total_it)
+            writer.add_scalar('explorer/pi_loss', pi_loss, self.total_it)
+            writer.add_scalar('explorer/temp_loss', temp_loss, self.total_it)
+
+    def rnd_src_update(self, src_replay_buffer, iters=1, batch_size=256):
+        """
+        Keep training the RND predictor on SOURCE ONLY.
+        Call this as often as you like (e.g., every train step).
+        """
+        self.rnd_predictor.train()
+        for _ in range(int(iters)):
+            s, a, s2, _, _ = src_replay_buffer.sample(batch_size)
+            with torch.no_grad():
+                z_t1 = self.rnd_target(s2)  # random embedding of next state
+            pred = self.rnd_predictor(torch.cat([s, a], dim=1))
+            loss = F.mse_loss(pred, z_t1)
+            self.rnd_opt.zero_grad()
+            loss.backward()
+            self.rnd_opt.step()
+
+
 
     def update_target(self):
         """moving average update of target networks"""
@@ -219,7 +373,7 @@ class DARC(object):
             writer.add_scalar('train/q1', q_1.mean(), self.total_it)
             writer.add_scalar('train/logprob', logprobs_batch.mean(), self.total_it)
         loss = F.mse_loss(q_1, value_target) + F.mse_loss(q_2, value_target)
-        return loss
+        return loss, q_target
 
     def update_policy_and_temp(self, state_batch):
         action_batch, logprobs_batch, _ = self.policy(state_batch, get_logprob=True)
@@ -239,6 +393,10 @@ class DARC(object):
         # follow the original paper, DARC has a warmup phase that does not involve reward modification
         if self.total_it <= int(1e5):
             src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(2*batch_size)
+            if self.config.get('rnd_src_steps_per_iter', 1) > 0:
+                self.rnd_src_update(src_replay_buffer,
+                            iters=self.config['rnd_src_steps_per_iter'],
+                            batch_size=self.config.get('rnd_batch_size', batch_size))
         else:
             if self.total_it % self.config['tar_env_interact_freq'] == 0:
                 self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
@@ -256,29 +414,105 @@ class DARC(object):
 
                 src_reward += self.config['penalty_coefficient'] * reward_penalty
 
-        q_loss_step = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
+            # update rnd predictor on source samples
+            if self.config.get('rnd_src_steps_per_iter', 1) > 0:
+              self.rnd_src_update(src_replay_buffer,
+                            iters=self.config['rnd_src_steps_per_iter'],
+                            batch_size=self.config.get('rnd_batch_size', batch_size))
+
+        q_loss_step, q_target = self.update_q_functions(src_state, src_action, src_reward, src_next_state, src_not_done, writer)
 
         self.q_optimizer.zero_grad()
         q_loss_step.backward()
         self.q_optimizer.step()
 
-        self.update_target()
-
-        # update policy and temperature parameter
+        # update policy and temperature
         for p in self.q_funcs.parameters():
             p.requires_grad = False
-        pi_loss_step, a_loss_step = self.update_policy_and_temp(src_state)
-        self.policy_optimizer.zero_grad()
+        pi_loss_step, alpha_loss_step = self.update_policy_and_temp(src_state)
+        self.pi_optimizer.zero_grad()
         pi_loss_step.backward()
-        self.policy_optimizer.step()
-
-        if self.config['temperature_opt']:
-            self.temp_optimizer.zero_grad()
-            a_loss_step.backward()
-            self.temp_optimizer.step()
-
+        self.pi_optimizer.step()
+        self.temp_optimizer.zero_grad()
+        alpha_loss_step.backward()
+        self.temp_optimizer.step()
         for p in self.q_funcs.parameters():
             p.requires_grad = True
+
+        # update classifier
+        if self.warm_up_step < self.current_step:
+            for _ in range(self.update_rate):
+                s, a, s2, r_env, not_done = src_replay_buffer.sample(batch_size)
+
+                # Intrinsic bonus (vs-source) and mixed reward for explorer
+                r_int = self._intrinsic_bonus(s, a, s2)
+                r = r_env + self.exp_beta * r_int
+
+                # --- Q update ---
+                with torch.no_grad():
+                    an, logp, _ = self.exp_policy(s2, get_logprob=True)
+                    q1t, q2t = self.exp_target_q_funcs(s2, an)
+                    q_t = torch.min(q1t, q2t)
+                    target = r + not_done * self.discount * (q_t - self._exp_alpha * logp)
+
+                q1, q2 = self.exp_q_funcs(s, a)
+                q_loss = F.mse_loss(q1, target) + F.mse_loss(q2, target)
+                self.exp_q_optimizer.zero_grad()
+                q_loss.backward()
+                self.exp_q_optimizer.step()
+
+                # soft update explorer target critics
+                self._update_target_net(self.exp_target_q_funcs, self.exp_q_funcs)
+
+                # --- policy + temperature updates ---
+                for p in self.exp_q_funcs.parameters(): p.requires_grad = False
+                ap, logp, _ = self.exp_policy(s, get_logprob=True)
+                q1b, q2b = self.exp_q_funcs(s, ap)
+                qv = torch.min(q1b, q2b)
+                pi_loss = (self._exp_alpha * logp - qv).mean()
+                self.exp_policy_optimizer.zero_grad()
+                pi_loss.backward()
+                self.exp_policy_optimizer.step()
+                for p in self.exp_q_funcs.parameters(): p.requires_grad = True
+
+                if self.config.get('exp_temperature_opt', True):
+                    temp_loss = -self._exp_alpha * (logp.detach() + (-self.config['action_dim'])).mean()
+                    self.exp_temp_optimizer.zero_grad()
+                    temp_loss.backward()
+                    self.exp_temp_optimizer.step()
+
+                source_logits, _ = self.classifier.sa_classifier(s)
+                target_logits, _ = self.classifier.sas_classifier(torch.cat([s, a, s2], dim=1))
+
+                # Compute the source and target domain losses
+                source_loss = F.binary_cross_entropy_with_logits(source_logits, torch.zeros_like(source_logits))
+                target_loss = F.binary_cross_entropy_with_logits(target_logits, torch.ones_like(target_logits))
+                classifier_loss = source_loss + target_loss
+
+                self.classifier_optimizer.zero_grad()
+                classifier_loss.backward()
+                self.classifier_optimizer.step()
+
+                source_acc = (torch.sigmoid(source_logits) < 0.5).float().mean()
+                target_acc = (torch.sigmoid(target_logits) > 0.5).float().mean()
+
+        if self.current_step % 1000 == 0:
+            writer.add_scalar('train/batch_reward', src_reward.mean(), self.current_step)
+            writer.add_scalar('train/q_target', q_target.mean(), self.current_step)
+            writer.add_scalar('train/critic_loss', q_loss_step.item(), self.current_step)
+            writer.add_scalar('train/actor_loss', pi_loss_step.item(), self.current_step)
+            writer.add_scalar('train/alpha', self.alpha, self.current_step)
+            writer.add_scalar('train/alpha_loss', alpha_loss_step.item(), self.current_step)
+            if self.warm_up_step < self.current_step:
+                writer.add_scalar('classifier/loss', classifier_loss.item(), self.current_step)
+                writer.add_scalar('classifier/source_acc', source_acc.item(), self.current_step)
+                writer.add_scalar('classifier/target_acc', target_acc.item(), self.current_step)
+                if 'reward_penalty' in locals():
+                    writer.add_scalar('classifier/reward_penalty', reward_penalty.mean().item(), self.current_step)
+
+        self.current_step += 1
+        self.update_target()
+        # ...existing code...
 
     @property
     def alpha(self):

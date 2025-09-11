@@ -282,7 +282,8 @@ if __name__ == "__main__":
             if t % config['tar_env_interact_interval'] == 0:
                 tar_steps += 1
                 tar_episode_timesteps += 1
-                tar_action = policy.select_action(np.array(tar_state), test=False)
+                tar_action = policy.select_action_explorer(np.array(tar_state), test=False)
+
 
                 tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
                 is_novel = kmeans_state_novelty.check_and_update(np.array(tar_next_state))
@@ -295,6 +296,12 @@ if __name__ == "__main__":
                     tar_reward -= 1.0
 
                 tar_replay_buffer.add(tar_state, tar_action, tar_next_state, tar_reward, tar_done_bool)
+                
+                policy.explorer_update(
+                    tar_replay_buffer,
+                    batch_size=config['batch_size'],
+                    writer=writer
+                )
 
                 tar_state = tar_next_state
                 tar_episode_reward += tar_reward
