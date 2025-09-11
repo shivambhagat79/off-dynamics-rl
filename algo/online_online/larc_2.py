@@ -155,8 +155,11 @@ class LARC(object):
         self.dynamics_optimizer = torch.optim.Adam(list(self.inverse_model.parameters()) + list(self.forward_model.parameters()), lr=config['liberty_lr'])
 
         # Hyperparameters for improvements
-        self.intrinsic_reward_coef = config['intrinsic_reward_coef']
-        self.target_policy_train_ratio = config['target_policy_train_ratio']
+        self.intrinsic_reward_coef = config.get('intrinsic_reward_coef', 0.01)
+        self.target_policy_train_ratio = config.get('target_policy_train_ratio', 10)
+        # *** IMPROVEMENT 2: Frequency for updating auxiliary models ***
+        self.aux_update_freq = config.get('aux_update_freq', 5)
+
 
     def select_action(self, state, test=True, explore=False):
         policy_to_use = self.explore_policy if explore and not test else self.policy
@@ -228,8 +231,8 @@ class LARC(object):
         src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(batch_size)
 
         if self.total_it > self.config.get('darc_warmup_steps', 10000):
-
-            self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
+            if self.total_it % self.aux_update_freq == 0:
+                self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
 
             with torch.no_grad():
                 sas_probs, sa_probs = self.classifier(src_state, src_action, src_next_state, with_noise=False)
@@ -274,8 +277,8 @@ class LARC(object):
 
         # --- Train Target (Exploratory) Policy with LIBERTY ---
         # Delayed update for liberty dynamics models
-
-        self.update_liberty_dynamics(tar_replay_buffer, batch_size, writer)
+        if self.total_it % self.aux_update_freq == 0:
+            self.update_liberty_dynamics(tar_replay_buffer, batch_size, writer)
 
         for _ in range(self.target_policy_train_ratio):
             tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
