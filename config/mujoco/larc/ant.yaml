@@ -7,7 +7,8 @@ gamma: 0.99
 liberty_lr: 0.001
 intrinsic_reward_coef: 1.0
 
-target_policy_train_ratio: 2
+target_policy_train_ratio: 10
+aux_update_freq: 5
 
 state_dim: 17
 action_dim: 3
