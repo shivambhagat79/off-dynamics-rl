@@ -228,6 +228,7 @@ class LARC(object):
         classifier_loss = src_loss + tar_loss
         self.classifier_optimizer.zero_grad()
         classifier_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), 1.0)
         self.classifier_optimizer.step()
 
     def update_liberty_and_target_policy(self, state, action, next_state):
@@ -254,6 +255,8 @@ class LARC(object):
                          self.config.get('liberty_metric_w', 1.0) * metric_loss)
 
         self.dynamics_optimizer.zero_grad()
+        liberty_params = list(self.metric_model.parameters()) + list(self.inverse_model.parameters()) + list(self.forward_model.parameters())
+        torch.nn.utils.clip_grad_norm_(liberty_params, 1.0)
         dynamics_loss.backward()
         self.dynamics_optimizer.step()
 
@@ -268,6 +271,7 @@ class LARC(object):
 
         self.target_policy_optimizer.zero_grad()
         policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.target_policy.parameters(), 1.0)
         self.target_policy_optimizer.step()
 
         for p in self.q_funcs.parameters():
@@ -317,6 +321,7 @@ class LARC(object):
 
         self.q_optimizer.zero_grad()
         total_q_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_funcs.parameters(), 1.0)
         self.q_optimizer.step()
 
     def update_source_policy_and_temp(self, src_state):
@@ -330,6 +335,7 @@ class LARC(object):
 
         self.policy_optimizer.zero_grad()
         policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
         self.policy_optimizer.step()
 
         # Update temperature
