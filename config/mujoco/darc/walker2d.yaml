@@ -27,3 +27,6 @@ tar_env_interact_freq: 10
 device: cuda
 
 save_freq: 5000
+rnd_src_steps_per_iter: 1 # how many source-only updates per DARC train() call
+rnd_batch_size: 256
+rnd_prefit_steps: 2000
