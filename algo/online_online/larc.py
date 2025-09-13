@@ -245,8 +245,8 @@ class LARC(object):
         forward_loss = -Normal(pred_next_state_mu, pred_next_state_std).log_prob(next_state).sum(axis=-1).mean()
 
         # Metric loss (bisimulation)
-        dist_s_next_s = self.metric_model(state, next_state)
-        dist_s_pred_next_s = self.metric_model(state, pred_next_state_mu.detach())
+        dist_s_next_s = F.relu(self.metric_model(state, next_state))
+        dist_s_pred_next_s = F.relu(self.metric_model(state, pred_next_state_mu.detach()))
         metric_loss = F.mse_loss(dist_s_next_s, dist_s_pred_next_s)
 
         dynamics_loss = (self.config.get('liberty_forward_w', 0.2) * forward_loss +
@@ -282,8 +282,8 @@ class LARC(object):
             batch_size = tar_state.shape[0]
             initial_state_batch = self.initial_state.expand(batch_size, -1)
 
-            phi_s = self.metric_model(tar_state, initial_state_batch)
-            phi_s_next = self.metric_model(tar_next_state, initial_state_batch)
+            phi_s = F.relu(self.metric_model(tar_state, initial_state_batch))
+            phi_s_next = F.relu(self.metric_model(tar_next_state, initial_state_batch))
             intrinsic_reward = self.config['gamma'] * phi_s_next - phi_s
             augmented_tar_reward = tar_reward + 2*self.config.get('liberty_eta', 0.5) * intrinsic_reward
 
