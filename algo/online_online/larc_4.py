@@ -275,6 +275,11 @@ class LARC(object):
 
     def update_q_functions(self, src_state, src_action, src_next_state, src_reward, src_not_done,
                            tar_state, tar_action, tar_next_state, tar_reward, tar_not_done):
+        # --- Calculate DARC reward for source transitions ---
+        with torch.no_grad():
+            src_trans = torch.cat([src_state, src_action, src_next_state], dim=1)
+            darc_reward = self.classifier(src_trans)
+            augmented_src_reward = src_reward + self.config['darc_lambda'] * darc_reward
 
         # --- Calculate LIBERTY intrinsic reward for target transitions ---
         with torch.no_grad():
@@ -285,15 +290,7 @@ class LARC(object):
             phi_s = self.metric_model(tar_state, initial_state_batch)
             phi_s_next = self.metric_model(tar_next_state, initial_state_batch)
             intrinsic_reward = self.config['gamma'] * phi_s_next - phi_s
-            augmented_tar_reward = tar_reward + 2*self.config.get('liberty_eta', 0.5) * intrinsic_reward
-
-        # --- Calculate DARC reward for source transitions ---
-        with torch.no_grad():
-            src_trans = torch.cat([src_state, src_action, src_next_state], dim=1)
-            darc_reward = self.classifier(src_trans)
-            augmented_src_reward = src_reward + self.config['darc_lambda'] * darc_reward + self.config.get('liberty_eta', 0.5) * intrinsic_reward
-
-
+            augmented_tar_reward = tar_reward + self.config.get('liberty_eta', 0.1) * intrinsic_reward
 
         # --- Compute target Q for both batches ---
         with torch.no_grad():
