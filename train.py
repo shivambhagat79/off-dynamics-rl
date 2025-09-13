@@ -305,7 +305,16 @@ if __name__ == "__main__":
             if t % config['tar_env_interact_interval'] == 0:
                 tar_steps += 1
                 tar_episode_timesteps += 1
+
+                # Enable exploration noise if applicable
+                if hasattr(policy, 'enable_exploration'):
+                    policy.enable_exploration()
+
                 tar_action = policy.select_action(np.array(tar_state), test=False)
+
+                # Disable exploration noise for next time step if applicable
+                if hasattr(policy, 'disable_exploration'):
+                    policy.disable_exploration()
 
                 tar_next_state, tar_reward, tar_done, _ = tar_env.step(tar_action)
 
