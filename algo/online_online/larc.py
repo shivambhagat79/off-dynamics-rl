@@ -178,13 +178,13 @@ class LARC(object):
     def _select_main_action(self, state):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
         dist = self.policy(state)
-        action, _ = dist.sample() # using sample() from the Actor class
+        action = dist.sample() # using sample() from the Actor class
         return action.clamp(-1, 1).cpu().data.numpy().flatten()
 
     def _select_target_action(self, state):
         state = torch.FloatTensor(state).to(self.device).unsqueeze(0)
         dist = self.target_policy(state)
-        action, _ = dist.sample()
+        action = dist.sample()
         return action.clamp(-1, 1).cpu().data.numpy().flatten()
 
     def p_source(self, state, action):
