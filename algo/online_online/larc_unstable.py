@@ -228,6 +228,7 @@ class LARC(object):
         classifier_loss = src_loss + tar_loss
         self.classifier_optimizer.zero_grad()
         classifier_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.classifier.parameters(), 1.0)
         self.classifier_optimizer.step()
 
     def update_liberty_and_target_policy(self, state, action, next_state):
@@ -245,8 +246,8 @@ class LARC(object):
         forward_loss = -Normal(pred_next_state_mu, pred_next_state_std).log_prob(next_state).sum(axis=-1).mean()
 
         # Metric loss (bisimulation)
-        dist_s_next_s = self.metric_model(state, next_state)
-        dist_s_pred_next_s = self.metric_model(state, pred_next_state_mu.detach())
+        dist_s_next_s = F.relu(self.metric_model(state, next_state))
+        dist_s_pred_next_s = F.relu(self.metric_model(state, pred_next_state_mu.detach()))
         metric_loss = F.mse_loss(dist_s_next_s, dist_s_pred_next_s)
 
         dynamics_loss = (self.config.get('liberty_forward_w', 0.2) * forward_loss +
@@ -254,6 +255,8 @@ class LARC(object):
                          self.config.get('liberty_metric_w', 1.0) * metric_loss)
 
         self.dynamics_optimizer.zero_grad()
+        liberty_params = list(self.metric_model.parameters()) + list(self.inverse_model.parameters()) + list(self.forward_model.parameters())
+        torch.nn.utils.clip_grad_norm_(liberty_params, 1.0)
         dynamics_loss.backward()
         self.dynamics_optimizer.step()
 
@@ -268,6 +271,7 @@ class LARC(object):
 
         self.target_policy_optimizer.zero_grad()
         policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.target_policy.parameters(), 1.0)
         self.target_policy_optimizer.step()
 
         for p in self.q_funcs.parameters():
@@ -275,11 +279,6 @@ class LARC(object):
 
     def update_q_functions(self, src_state, src_action, src_next_state, src_reward, src_not_done,
                            tar_state, tar_action, tar_next_state, tar_reward, tar_not_done):
-        # --- Calculate DARC reward for source transitions ---
-        with torch.no_grad():
-            src_trans = torch.cat([src_state, src_action, src_next_state], dim=1)
-            darc_reward = self.classifier(src_trans)
-            augmented_src_reward = src_reward + self.config['darc_lambda'] * darc_reward
 
         # --- Calculate LIBERTY intrinsic reward for target transitions ---
         with torch.no_grad():
@@ -287,10 +286,18 @@ class LARC(object):
             batch_size = tar_state.shape[0]
             initial_state_batch = self.initial_state.expand(batch_size, -1)
 
-            phi_s = self.metric_model(tar_state, initial_state_batch)
-            phi_s_next = self.metric_model(tar_next_state, initial_state_batch)
+            phi_s = F.relu(self.metric_model(tar_state, initial_state_batch))
+            phi_s_next = F.relu(self.metric_model(tar_next_state, initial_state_batch))
             intrinsic_reward = self.config['gamma'] * phi_s_next - phi_s
-            augmented_tar_reward = tar_reward + self.config.get('liberty_eta', 0.1) * intrinsic_reward
+            augmented_tar_reward = tar_reward + 2*self.config.get('liberty_eta', 0.5) * intrinsic_reward
+
+        # --- Calculate DARC reward for source transitions ---
+        with torch.no_grad():
+            src_trans = torch.cat([src_state, src_action, src_next_state], dim=1)
+            darc_reward = self.classifier(src_trans)
+            augmented_src_reward = src_reward + self.config['darc_lambda'] * darc_reward + self.config.get('liberty_eta', 0.5) * intrinsic_reward
+
+
 
         # --- Compute target Q for both batches ---
         with torch.no_grad():
@@ -314,6 +321,7 @@ class LARC(object):
 
         self.q_optimizer.zero_grad()
         total_q_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_funcs.parameters(), 1.0)
         self.q_optimizer.step()
 
     def update_source_policy_and_temp(self, src_state):
@@ -327,6 +335,7 @@ class LARC(object):
 
         self.policy_optimizer.zero_grad()
         policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
         self.policy_optimizer.step()
 
         # Update temperature
