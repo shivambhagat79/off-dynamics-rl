@@ -46,6 +46,11 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
                 HopperEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
                 max_episode_steps=1000
             )
+        elif 'crippled' in env_name:
+            return TimeLimit(
+                HopperEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/hopper_crippled_thigh.xml",),
+                max_episode_steps=1000
+            )
         else:
             print("env_name {env_name} is illegal or not implemented")
             raise NotImplementedError
@@ -89,6 +94,11 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
                 Walker2dEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
                 max_episode_steps=1000
             )
+        elif 'crippled' in env_name:
+            return TimeLimit(
+                Walker2dEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/walker2d_crippled_thigh.xml",),
+                max_episode_steps=1000
+            )
         else:
             print("env_name {env_name} is illegal or not implemented")
             raise NotImplementedError
@@ -106,6 +116,11 @@ def call_mujoco_env(env_config: Dict) -> gym.Env:
         elif 'morph' in env_name or 'kinematic' in env_name:
             return TimeLimit(
                 AntEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/{env_name}_{shift_level}.xml",),
+                max_episode_steps=1000
+            )
+        elif 'crippled' in env_name:
+            return TimeLimit(
+                AntEnv(xml_file=f"{str(Path(__file__).parent.absolute())}/assets/ant_crippled_hip.xml",),
                 max_episode_steps=1000
             )
         else:
