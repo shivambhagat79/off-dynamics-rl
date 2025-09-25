@@ -78,6 +78,20 @@ class Policy(nn.Module):
 
         return action * self.max_action, logprob, mean * self.max_action
 
+    def get_logprob_of(self, state, action):
+        mu_logstd = self.network(state)
+        mu, logstd = mu_logstd.chunk(2, dim=1)
+        logstd = torch.clamp(logstd, -20, 2)
+        std = logstd.exp()
+        dist = Normal(mu, std)
+        transforms = [TanhTransform(cache_size=1)]
+        dist = TransformedDistribution(dist, transforms)
+        # Un-scale the action to be in the [-1, 1] range of the Tanh transform
+        unscaled_action = action / self.max_action
+        # Clamp to avoid issues with atanh
+        unscaled_action = torch.clamp(unscaled_action, -0.99999, 0.99999)
+        return dist.log_prob(unscaled_action).sum(axis=-1, keepdim=True)
+
 
 class DoubleQFunc(nn.Module):
 
@@ -174,6 +188,9 @@ class EPIC(object):
         self.exploration_policy_optimizer = torch.optim.Adam(self.exploration_policy.parameters(), lr=exploration_actor_lr)
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
         self.classifier_optimizer = torch.optim.Adam(self.classifier.parameters(), lr=config['actor_lr'])
+
+        self.use_importance_sampling = config.get('use_importance_sampling', True)
+        self.use_dynamics_sampling = config.get('use_dynamics_sampling', True)
 
     def select_action(self, state, test=True):
         with torch.no_grad():
@@ -306,6 +323,37 @@ class EPIC(object):
         policy_loss = (self.alpha.detach() * logprobs_batch - qval_batch).mean()
         return policy_loss
 
+    def _get_dynamics_weights(self, target_states, target_actions, target_next_states):
+        """Calculate dynamics importance sampling weights using the DARC classifier."""
+        with torch.no_grad():
+            sas_probs, sa_probs = self.classifier(target_states, target_actions, target_next_states, with_noise=False)
+            sas_log_probs, sa_log_probs = torch.log(sas_probs + 1e-10), torch.log(sa_probs + 1e-10)
+            
+            # This is log( p_tar(s'|s,a) / p_src(s'|s,a) )
+            reward_penalty = sas_log_probs[:, 1:] - sa_log_probs[:, 1:] - sas_log_probs[:, :1] + sa_log_probs[:, :1]
+            
+            # We want the inverse ratio: p_src / p_tar
+            weights = torch.exp(-reward_penalty)
+            
+            # Clamp for stability
+            weights = torch.clamp(weights, 0.0, 10.0)
+        return weights
+
+    def _get_importance_weights(self, target_states, target_actions):
+        """Calculate importance sampling weights."""
+        with torch.no_grad():
+            # Probability of action under the main policy
+            log_prob_main = self.policy.get_logprob_of(target_states, target_actions)
+            # Probability of action under the exploration policy
+            log_prob_exp = self.exploration_policy.get_logprob_of(target_states, target_actions)
+            
+            # Ratio: pi_main / pi_exploration
+            weights = torch.exp(log_prob_main - log_prob_exp)
+            
+            # Clamp weights for stability
+            weights = torch.clamp(weights, 0.0, 10.0)
+        return weights
+
     def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=128, writer=None):
 
         self.total_it += 1
@@ -358,7 +406,39 @@ class EPIC(object):
         reward = torch.cat([src_reward, tar_reward], 0)
         not_done = torch.cat([src_not_done, tar_not_done], 0)
 
-        q_loss_step = self.update_q_functions(state, action, reward, next_state, not_done, writer)
+        # --- Importance Sampling for Target Data ---
+        # Policy IS weights
+        if self.use_importance_sampling:
+            w_policy = self._get_importance_weights(tar_state, tar_action)
+        else:
+            w_policy = torch.ones_like(tar_reward)
+
+        # Dynamics IS weights
+        if self.use_dynamics_sampling and self.total_it > self.config.get('darc_warmup_steps', 100000):
+            w_dynamics = self._get_dynamics_weights(tar_state, tar_action, tar_next_state)
+        else:
+            w_dynamics = torch.ones_like(tar_reward)
+        
+        is_weights = w_policy * w_dynamics
+
+        # --- Q-Function Update ---
+        with torch.no_grad():
+            nextaction_batch, logprobs_batch, _ = self.policy(next_state, get_logprob=True)
+            q_t1, q_t2 = self.target_q_funcs(next_state, nextaction_batch)
+            q_target = torch.min(q_t1, q_t2)
+            value_target = reward + not_done * self.discount * (q_target - self.alpha * logprobs_batch)
+        
+        q_1, q_2 = self.q_funcs(state, action)
+        
+        # Separate losses for source and target
+        q1_loss_src = F.mse_loss(q_1[:batch_size], value_target[:batch_size])
+        q2_loss_src = F.mse_loss(q_2[:batch_size], value_target[:batch_size])
+        
+        # Apply IS weights to target loss
+        q1_loss_tar = (is_weights * (q_1[batch_size:] - value_target[batch_size:])**2).mean()
+        q2_loss_tar = (is_weights * (q_2[batch_size:] - value_target[batch_size:])**2).mean()
+
+        q_loss_step = q1_loss_src + q2_loss_src + q1_loss_tar + q2_loss_tar
 
         self.q_optimizer.zero_grad()
         q_loss_step.backward()
@@ -369,8 +449,22 @@ class EPIC(object):
             for p in self.q_funcs.parameters():
                 p.requires_grad = False
 
-            # Update main source policy and temperature on combined batch
-            pi_loss_step, a_loss_step = self.update_policy_and_temp(state)
+            # --- Main Policy and Temperature Update ---
+            action_batch, logprobs_batch, _ = self.policy(state, get_logprob=True)
+            q_b1, q_b2 = self.q_funcs(state, action_batch)
+            qval_batch = torch.min(q_b1, q_b2)
+
+            # Separate the log-probs for source and target
+            logprobs_src, logprobs_tar = logprobs_batch.chunk(2, dim=0)
+
+            # Weight the target policy loss
+            policy_loss_src = (self.alpha * logprobs_src - qval_batch[:batch_size]).mean()
+            policy_loss_tar = (is_weights * (self.alpha * logprobs_tar - qval_batch[batch_size:])).mean()
+            pi_loss_step = policy_loss_src + policy_loss_tar
+
+            # Temperature loss is calculated on the full batch
+            a_loss_step = -self.alpha * (logprobs_batch.detach() + self.target_entropy).mean()
+
             self.policy_optimizer.zero_grad()
             pi_loss_step.backward()
             self.policy_optimizer.step()
@@ -380,7 +474,8 @@ class EPIC(object):
                 a_loss_step.backward()
                 self.temp_optimizer.step()
 
-            # Update independent exploration policy on target batch only
+            # --- Exploration Policy Update (UNCHANGED) ---
+            # This update remains untouched, using only target data and no importance sampling.
             exp_pi_loss_step = self.update_exploration_policy(tar_state)
             self.exploration_policy_optimizer.zero_grad()
             exp_pi_loss_step.backward()
