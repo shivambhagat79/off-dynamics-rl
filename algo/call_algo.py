@@ -22,7 +22,7 @@ def call_algo(algo_name, config, mode, device):
         from online_online.epic import EPIC
         from online_online.nomad import NOMAD
         from online_online.nomad_v2 import NOMAD_V2
-        from online_online.nomad_v3 import NOVAD_V3
+        from online_online.nomad_v3 import NOMAD_V3
 
         algo_to_call = {
             'sac': SAC,
@@ -36,7 +36,7 @@ def call_algo(algo_name, config, mode, device):
             'epic': EPIC,
             'nomad': NOMAD,
             'nomad_v2': NOMAD_V2,
-            'novad_v3': NOVAD_V3,
+            'nomad_v3': NOMAD_V3,
         }
 
         algo = algo_to_call[algo_name]
