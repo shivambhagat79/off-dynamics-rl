@@ -9,7 +9,7 @@ def call_algo(algo_name, config, mode, device):
         policy = SAC_Target_Only(config, device)
     elif mode == 0:
         algo_name = algo_name.lower()
-        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty', 'larc', 'epic', 'nomad', 'nomad_v2', 'novad_v3']
+        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty', 'larc', 'epic', 'nomad', 'nomad_v2', 'nomad_v3']
         # online online setting
         from online_online.darc import DARC
         from online_online.sac import SAC
