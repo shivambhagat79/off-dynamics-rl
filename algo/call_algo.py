@@ -9,7 +9,7 @@ def call_algo(algo_name, config, mode, device):
         policy = SAC_Target_Only(config, device)
     elif mode == 0:
         algo_name = algo_name.lower()
-        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty', 'larc', 'epic', 'nomad', 'nomad_v2', 'nomad_v3', 'nomad_weight']
+        assert algo_name in ['sac', 'darc', 'vgdf', 'sac_iw', 'par', 'sac_liberty', 'darc_liberty', 'larc', 'epic', 'nomad', 'nomad_v2', 'nomad_v3', 'nomad_v4','nomad_weight']
         # online online setting
         from online_online.darc import DARC
         from online_online.sac import SAC
@@ -23,6 +23,7 @@ def call_algo(algo_name, config, mode, device):
         from online_online.nomad import NOMAD
         from online_online.nomad_v2 import NOMAD_V2
         from online_online.nomad_v3 import NOMAD_V3
+        from online_online.nomad_v4 import NOMAD_V4
         from online_online.nomad_weight import NOMAD_V3 as NOMAD_WEIGHT
 
         algo_to_call = {
@@ -38,6 +39,7 @@ def call_algo(algo_name, config, mode, device):
             'nomad': NOMAD,
             'nomad_v2': NOMAD_V2,
             'nomad_v3': NOMAD_V3,
+            'nomad_v4': NOMAD_V4,
             'nomad_weight': NOMAD_WEIGHT,
         }
 
