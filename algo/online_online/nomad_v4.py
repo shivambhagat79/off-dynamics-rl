@@ -118,7 +118,7 @@ class Classifier(nn.Module):
         return sas_logits, sa_logits
 
 
-class NOMAD_V3(object):
+class NOMAD_V4(object):
 
     def __init__(self,
                  config,
