@@ -20,7 +20,12 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
     plt.figure(figsize=(12, 8))
 
     results_dir = 'results'
-    algos = sorted([d for d in os.listdir(results_dir) if os.path.isdir(os.path.join(results_dir, d))])
+    # List of algorithms to ignore
+    ignore_algos = ['EPIC', 'NOMAD_V2', 'NOMAD_V3']
+    algos = sorted([
+        d for d in os.listdir(results_dir) 
+        if os.path.isdir(os.path.join(results_dir, d)) and d not in ignore_algos
+    ])
 
     for algo in algos:
         env_path = os.path.join(results_dir, algo, env_name)
