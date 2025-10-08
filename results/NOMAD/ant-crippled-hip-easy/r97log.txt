@@ -1,5 +1,5 @@
 
- Policy: NOMAD; Env: ant-crippled-hip, seed: 97
+ Policy: nomad_weight; Env: ant-crippled-hip, seed: 97
  ('alpha', 0.2)
  ('batch_size', 128)
  ('actor_lr', 0.0003)

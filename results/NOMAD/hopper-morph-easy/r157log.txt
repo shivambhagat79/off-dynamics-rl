@@ -1,5 +1,5 @@
 
- Policy: NOMAD; Env: hopper-morph, seed: 157
+ Policy: nomad_weight; Env: hopper-morph, seed: 157
  ('alpha', 0.2)
  ('batch_size', 128)
  ('actor_lr', 0.0003)
