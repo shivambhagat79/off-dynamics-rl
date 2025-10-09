@@ -85,7 +85,7 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
             all_values = np.array([d[1] for d in processed_seeds_data])
             
             # Convert steps to percentage
-            steps = (np.array(steps) / 1_000_000) * 100
+            steps = (np.array(steps) )/10
 
 
 
@@ -128,4 +128,4 @@ if __name__ == '__main__':
     plot_scalar(args.env, 'novelty/total_novel_states', 'Training Timestep', 'Total Novel States', f'Total Novel States on {args.env}')
 
     # Plot 3: test/target_return
-    plot_scalar(args.env, 'test/target_return', 'Test Number', 'Target Test Score', f'Target Test Score on {args.env}')
+    plot_scalar(args.env, 'test/target_return', 'Time Steps', 'Target Test Score', f'Target Test Score on {args.env}')
