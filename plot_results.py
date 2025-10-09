@@ -21,7 +21,7 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
 
     results_dir = 'results'
     # List of algorithms to ignore
-    ignore_algos = ['EPIC', 'NOMAD_V2', 'NOMAD_V3']
+    ignore_algos = ['EPIC', 'NOMAD_V2', 'NOMAD_V3','SAC']
     algos = sorted([
         d for d in os.listdir(results_dir) 
         if os.path.isdir(os.path.join(results_dir, d)) and d not in ignore_algos
@@ -98,10 +98,10 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
         plt.plot(steps, mean_values, label=algo)
         plt.fill_between(steps, mean_values - std_values, mean_values + std_values, alpha=0.2)
 
-    plt.title(title)
-    plt.xlabel(x_label)
-    plt.ylabel(y_label)
-    plt.legend()
+    plt.title(title, fontsize=18)
+    plt.xlabel(x_label, fontsize=17)
+    plt.ylabel(y_label, fontsize=17)
+    plt.legend(fontsize=12)
     plt.grid(True)
 
     plot_dir = os.path.join('plots', env_name)
