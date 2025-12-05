@@ -1,0 +1,36 @@
+alpha: 0.2
+batch_size: 128
+actor_lr: 0.0003
+critic_lr: 0.0003
+gamma: 0.99
+
+# RND specific parameters
+source_model_lr: 0.0003
+intrinsic_reward_coef: 0.1 # Needs tuning
+num_source_models: 7
+model_update_freq: 250
+
+state_dim: 11
+action_dim: 3
+hidden_sizes: 256
+max_action: 1
+
+gaussian_noise_std: 1.0
+penalty_coefficient: 1.0 # For DARC dynamics weights
+
+temperature_opt: False
+
+tau: 0.005
+update_interval: 2 # This seems to be unused, policy_freq is used instead
+policy_freq: 2
+
+eval_episode: 10
+eval_freq: 10000
+start_steps: 5000
+max_step: 1000000
+tar_env_interact_freq: 10
+darc_warmup_steps: 10000
+classifier_update_freq: 10
+
+device: cuda
+save_freq: 5000
