@@ -504,11 +504,13 @@ class BOSA:
         ll = self.vae_dyna.importance_sampling_estimator(state, action, next_state, beta, num_samples)  #   [E, B]
         return -ll
 
-    def vae_models_train(self, batch: TensorBatch) -> Dict[str, float]:
+    def vae_models_train(self, batch_mix: TensorBatch, batch_tar: TensorBatch) -> Dict[str, float]:
         log_dict = {}
         self.total_it += 1
-        loss_dict_vae_policy    =   self.vae_policy_train(batch)
-        loss_dict_vae_dynamics  =   self.vae_dyna_train(batch)
+        # policy CVAE, using mixed batch for training
+        loss_dict_vae_policy    =   self.vae_policy_train(batch_mix)
+        # dynamics CVAE, using target batch for training
+        loss_dict_vae_dynamics  =   self.vae_dyna_train(batch_tar)
         log_dict.update(loss_dict_vae_policy)
         log_dict.update(loss_dict_vae_dynamics)
         return log_dict
@@ -556,10 +558,13 @@ class BOSA:
             return
         batch_src, batch_tar = src_replay_buffer.sample(batch_size), tar_replay_buffer.sample(batch_size)
         batch_mix            = [torch.cat([b_tar, b_src], dim=0) for b_tar, b_src in zip(batch_tar, batch_src)]
+
+        # for target CVAE training, the batch size follows BOSA paper, should be 2*bs
+        batch_tar_cvae = tar_replay_buffer.sample(2*batch_size)
         
         if self.total_it < self.vae_iteration:
             # vae model pretrain
-            log_dict = self.vae_models_train(batch_mix)
+            log_dict = self.vae_models_train(batch_mix, batch_tar_cvae)
         else:
             log_dict = {}
             state_tar, action_tar, next_state_tar, reward_tar, done_tar = batch_tar
