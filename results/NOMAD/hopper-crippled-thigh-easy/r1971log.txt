@@ -1,5 +1,5 @@
 
- Policy: NOMAD; Env: hopper-crippled-thigh, seed: 1971
+ Policy: nomad_weight; Env: hopper-crippled-thigh, seed: 1971
  ('alpha', 0.2)
  ('batch_size', 128)
  ('actor_lr', 0.0003)

@@ -20,7 +20,12 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
     plt.figure(figsize=(12, 8))
 
     results_dir = 'results'
-    algos = sorted([d for d in os.listdir(results_dir) if os.path.isdir(os.path.join(results_dir, d))])
+    # List of algorithms to ignore
+    ignore_algos = ['EPIC', 'NOMAD_V2', 'NOMAD_V3','SAC']
+    algos = sorted([
+        d for d in os.listdir(results_dir) 
+        if os.path.isdir(os.path.join(results_dir, d)) and d not in ignore_algos
+    ])
 
     for algo in algos:
         env_path = os.path.join(results_dir, algo, env_name)
@@ -44,15 +49,13 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
 
                 if scalar_name in ea.Tags()['scalars']:
                     scalar_data = ea.Scalars(scalar_name)
-                    steps = [s.step for s in scalar_data]
-                    values = [s.value for s in scalar_data]
+                    
+                    # Filter out steps greater than 1M and keep data as pairs
+                    step_value_pairs = [(s.step, s.value) for s in scalar_data if s.step <= 1_000_000]
 
-                    # Use steps as x-axis for total_novel_states, otherwise use episode number
-                    if 'total_novel_states' in scalar_name:
-                        all_seeds_data.append((steps, values))
-                        min_len = min(min_len, len(steps))
-                    else:
-                        all_seeds_data.append(values)
+                    if step_value_pairs:
+                        steps, values = zip(*step_value_pairs)
+                        all_seeds_data.append((list(steps), list(values)))
                         min_len = min(min_len, len(values))
 
             except Exception as e:
@@ -61,18 +64,29 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
         if not all_seeds_data:
             continue
 
-        # Trim all data to the minimum length
-        if 'total_novel_states' in scalar_name:
+        # Check if the plot should be by episode or by timestep
+        is_episode_based = 'episode' in scalar_name
+
+        if is_episode_based:
+            # For episode-based plots, the values are the data, and steps are just indices
+            processed_seeds_data = [d[1] for d in all_seeds_data]
+            all_values = np.array([run[:min_len] for run in processed_seeds_data])
+            steps = np.arange(min_len)
+        else:
+            # For timestep-based plots, truncate and use real steps
             processed_seeds_data = []
             for steps, values in all_seeds_data:
                 processed_seeds_data.append((steps[:min_len], values[:min_len]))
-            all_seeds_data = processed_seeds_data
-            steps = all_seeds_data[0][0]
-            all_values = np.array([d[1] for d in all_seeds_data])
-        else:
-            processed_seeds_data = [d[:min_len] for d in all_seeds_data]
-            all_values = np.array(processed_seeds_data)
-            steps = np.arange(min_len)
+            
+            if not processed_seeds_data:
+                continue
+
+            steps = processed_seeds_data[0][0]
+            all_values = np.array([d[1] for d in processed_seeds_data])
+            
+            # Convert steps to percentage
+            steps = (np.array(steps) )/10
+
 
 
         mean_values = np.mean(all_values, axis=0)
@@ -84,10 +98,10 @@ def plot_scalar(env_name, scalar_name, x_label, y_label, title):
         plt.plot(steps, mean_values, label=algo)
         plt.fill_between(steps, mean_values - std_values, mean_values + std_values, alpha=0.2)
 
-    plt.title(title)
-    plt.xlabel(x_label)
-    plt.ylabel(y_label)
-    plt.legend()
+    plt.title(title, fontsize=18)
+    plt.xlabel(x_label, fontsize=17)
+    plt.ylabel(y_label, fontsize=17)
+    plt.legend(fontsize=12)
     plt.grid(True)
 
     plot_dir = os.path.join('plots', env_name)
@@ -114,4 +128,4 @@ if __name__ == '__main__':
     plot_scalar(args.env, 'novelty/total_novel_states', 'Training Timestep', 'Total Novel States', f'Total Novel States on {args.env}')
 
     # Plot 3: test/target_return
-    plot_scalar(args.env, 'test/target_return', 'Test Number', 'Target Test Score', f'Target Test Score on {args.env}')
+    plot_scalar(args.env, 'test/target_return', 'Time Steps', 'Target Test Score', f'Target Test Score on {args.env}')
