@@ -298,7 +298,7 @@ class NOMAD_RND(object):
             for target_q_param, q_param in zip(self.target_exp_q_funcs.parameters(), self.exp_q_funcs.parameters()):
                 target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
 
-    def train(self, src_replay_buffer, tar_replay_buffer, batch_size=128, writer=None):
+    def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=128, writer=None):
         self.total_it += 1
         if src_replay_buffer.size < batch_size or tar_replay_buffer.size < batch_size:
             return
