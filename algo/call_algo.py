@@ -25,7 +25,8 @@ def call_algo(algo_name, config, mode, device):
         from online_online.nomad_v3 import NOMAD_V3
         from online_online.nomad_v4 import NOMAD_V4
         from online_online.nomad_weight import NOMAD_V3 as NOMAD_WEIGHT
-        from online_online.nomad_idbm import NOMAD_IDBM
+        from online_online.nomad_rnd import NOMAD_RND
+        from online_online.nomad_idbm_v2 import NOMAD_IDBM_V2
 
         algo_to_call = {
             'sac': SAC,
@@ -42,7 +43,8 @@ def call_algo(algo_name, config, mode, device):
             'nomad_v3': NOMAD_V3,
             'nomad_v4': NOMAD_V4,
             'nomad_weight': NOMAD_WEIGHT,
-            'nomad_idbm': NOMAD_IDBM,
+            'nomad_rnd': NOMAD_RND,
+            'nomad_idbm_v2': NOMAD_IDBM_V2,
         }
 
         algo = algo_to_call[algo_name]
