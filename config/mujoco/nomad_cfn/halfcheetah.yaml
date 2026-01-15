@@ -1,0 +1,41 @@
+alpha: 0.2
+batch_size: 128
+actor_lr: 0.0003
+critic_lr: 0.0003
+classifier_lr: 0.0003
+gamma: 0.99
+
+# CFN parameters (Coin Flip Network exploration)
+cfn_output_dim: 20
+cfn_bonus_exponent: 0.5
+intrinsic_reward_scale: 1.0
+cfn_p_replace: 1.0
+cfn_reward_normalization: True
+cfn_update_freq: 1
+cfn_lr: 0.0003
+exploration_actor_lr: 0.0003
+
+state_dim: 17
+action_dim: 3
+hidden_sizes: 256
+max_action: 1
+
+gaussian_noise_std: 0.5
+darc_warmup_steps: 10000
+classifier_update_freq: 10
+
+temperature_opt: True
+
+tau: 0.005
+policy_freq: 2
+expl_noise: 0.2
+
+eval_episode: 10
+eval_freq: 10000
+start_steps: 5000
+max_step: 1000000
+tar_env_interact_freq: 10
+
+device: cuda
+
+save_freq: 5000
