@@ -8,7 +8,7 @@ from torch.distributions import Normal, TransformedDistribution, constraints
 from torch.distributions.transforms import Transform
 
 # Import the new models for LIBERTY exploration
-from algo.liberty_models import MetricModel, InverseDynamicsModel, ForwardDynamicsModel
+from liberty_models import MetricModel, InverseDynamicsModel, ForwardDynamicsModel
 
 
 class TanhTransform(Transform):
@@ -138,7 +138,16 @@ class Classifier(nn.Module):
         return sas_logits, sa_logits
 
 
-class NOMAD_V3(object):
+class NOMAD_IDBM_SEPARATE(object):
+    """
+    NOMAD-IDBM with SEPARATE critics for exploration and task policies.
+    
+    Key differences from original:
+    - exploration_q_funcs: Dedicated critic for exploration policy (with intrinsic rewards)
+    - task_q_funcs: Dedicated critic for task policy (with IS-weighted extrinsic rewards)
+    - No gradient interference between exploration and task objectives
+    - Cleaner separation of concerns at the cost of 2x critic parameters
+    """
 
     def __init__(self,
                  config,
@@ -160,11 +169,19 @@ class NOMAD_V3(object):
         self.temp_lr = config.get('temp_lr', 1e-5)
         self.policy_noise_clip = config.get('policy_noise_clip', 0.5)
 
-        # Q-functions (critic) - shared between policies
-        self.q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
-        self.target_q_funcs = copy.deepcopy(self.q_funcs)
-        self.target_q_funcs.eval()
-        for p in self.target_q_funcs.parameters():
+        # === SEPARATE CRITICS ===
+        # Exploration Q-functions (for target_policy with intrinsic rewards)
+        self.exploration_q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.target_exploration_q_funcs = copy.deepcopy(self.exploration_q_funcs)
+        self.target_exploration_q_funcs.eval()
+        for p in self.target_exploration_q_funcs.parameters():
+            p.requires_grad = False
+
+        # Task Q-functions (for source policy with extrinsic rewards)
+        self.task_q_funcs = DoubleQFunc(config['state_dim'], config['action_dim'], hidden_size=config['hidden_sizes']).to(self.device)
+        self.target_task_q_funcs = copy.deepcopy(self.task_q_funcs)
+        self.target_task_q_funcs.eval()
+        for p in self.target_task_q_funcs.parameters():
             p.requires_grad = False
 
         # Source policy (actor) - for training and testing
@@ -190,7 +207,8 @@ class NOMAD_V3(object):
         self.intrinsic_reward_coef = config.get('intrinsic_reward_coef', 0.003)
 
         # Optimizers
-        self.q_optimizer = torch.optim.Adam(self.q_funcs.parameters(), lr=config['critic_lr'])
+        self.exploration_q_optimizer = torch.optim.Adam(self.exploration_q_funcs.parameters(), lr=config['critic_lr'])
+        self.task_q_optimizer = torch.optim.Adam(self.task_q_funcs.parameters(), lr=config['critic_lr'])
         self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=config['actor_lr'])
         self.target_policy_optimizer = torch.optim.Adam(self.target_policy.parameters(), lr=config.get('exploration_actor_lr', config['actor_lr']))
         self.temp_optimizer = torch.optim.Adam([self.log_alpha], lr=config['actor_lr'])
@@ -245,30 +263,44 @@ class NOMAD_V3(object):
         if writer is not None and self.total_it % 5000 == 0:
             writer.add_scalar('train/classifier_loss', loss.item(), global_step=self.total_it)
 
-    def _update_liberty_models(self, state, action, reward, next_state, writer):
-        # Update inverse and forward dynamics models
-        pred_action = self.inverse_model(state, next_state)
-        inverse_loss = F.mse_loss(pred_action, action)
-        pred_next_state_mu, pred_next_state_std = self.forward_model(state, action)
+    def _update_liberty_models(self, src_data, tar_data, writer):
+        # Unpack both Source and Target data
+        src_state, src_action, src_reward, src_next_state = src_data
+        tar_state, tar_action, tar_reward, tar_next_state = tar_data
+
+        # Update inverse and forward dynamics models on Target data
+        pred_action = self.inverse_model(tar_state, tar_next_state)
+        inverse_loss = F.mse_loss(pred_action, tar_action)
+
+        pred_next_state_mu, pred_next_state_std = self.forward_model(tar_state, tar_action)
         forward_dist = Normal(pred_next_state_mu, pred_next_state_std)
-        forward_loss = -forward_dist.log_prob(next_state).mean()
+        forward_loss = -forward_dist.log_prob(tar_next_state).mean()
+
         dynamics_loss = inverse_loss + forward_loss
         self.dynamics_optimizer.zero_grad()
         dynamics_loss.backward()
         self.dynamics_optimizer.step()
 
-        # Update metric model
-        perm = torch.randperm(state.size(0))
-        state_p, action_p, reward_p, next_state_p = state[perm], action[perm], reward[perm], next_state[perm]
+        # Update metric model - compare Source states to Target states for Bisimulation
+        state, action, reward, next_state = src_state, src_action, src_reward, src_next_state
+        state_p, action_p, reward_p, next_state_p = tar_state, tar_action, tar_reward, tar_next_state
+
         with torch.no_grad():
+            # Reward difference across domains
             r_dist = torch.abs(reward - reward_p)
+
+            # Forward dynamics (Wasserstein) difference
             mu, std = self.forward_model(state, action)
             mu_p, std_p = self.forward_model(state_p, action_p)
+
             w2_dist_sq = torch.sum((mu - mu_p)**2, dim=-1, keepdim=True) + torch.sum((std - std_p)**2, dim=-1, keepdim=True)
             w2_dist = torch.sqrt(w2_dist_sq + 1e-6)
+
+            # Inverse dynamics difference
             pred_a = self.inverse_model(state, next_state)
             pred_a_p = self.inverse_model(state_p, next_state_p)
             inv_dist = torch.sum(torch.abs(pred_a - pred_a_p), dim=-1, keepdim=True)
+
             target_metric = r_dist + self.discount * (w2_dist + inv_dist)
 
         predicted_metric = self.metric_model(state, state_p)
@@ -282,9 +314,14 @@ class NOMAD_V3(object):
             writer.add_scalar('liberty/metric_loss', metric_loss.item(), self.total_it)
 
     def update_target(self):
-        """Soft update of target networks."""
+        """Soft update of target networks for BOTH critics."""
         with torch.no_grad():
-            for target_q_param, q_param in zip(self.target_q_funcs.parameters(), self.q_funcs.parameters()):
+            # Update exploration critic target
+            for target_q_param, q_param in zip(self.target_exploration_q_funcs.parameters(), self.exploration_q_funcs.parameters()):
+                target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
+            
+            # Update task critic target
+            for target_q_param, q_param in zip(self.target_task_q_funcs.parameters(), self.task_q_funcs.parameters()):
                 target_q_param.data.copy_(self.tau * q_param.data + (1.0 - self.tau) * target_q_param.data)
 
     def train(self, src_replay_buffer, tar_replay_buffer, initial_state, batch_size=128, writer=None):
@@ -293,15 +330,20 @@ class NOMAD_V3(object):
             return
 
         # --- 1. Auxiliary Model Updates ---
+        src_state_lib, src_action_lib, src_next_state_lib, src_reward_lib, _ = src_replay_buffer.sample(batch_size)
         tar_state_lib, tar_action_lib, tar_next_state_lib, tar_reward_lib, _ = tar_replay_buffer.sample(batch_size)
-        self._update_liberty_models(tar_state_lib, tar_action_lib, tar_reward_lib, tar_next_state_lib, writer)
+
+        src_data = (src_state_lib, src_action_lib, src_reward_lib, src_next_state_lib)
+        tar_data = (tar_state_lib, tar_action_lib, tar_reward_lib, tar_next_state_lib)
+
+        self._update_liberty_models(src_data, tar_data, writer)
 
         if self.total_it > self.config.get('darc_warmup_steps', 10000):
             if self.total_it % self.config.get('classifier_update_freq', 10) == 0:
                 self.update_classifier(src_replay_buffer, tar_replay_buffer, batch_size, writer)
 
-        # --- 2. Target Policy Training Step (Exploratory Policy) ---
-        # This step trains the target_policy and the shared Q-functions ONLY on target data with LIBERTY rewards.
+        # --- 2. Exploration Policy Training Step ---
+        # Uses EXPLORATION CRITIC with intrinsic rewards
         tar_state, tar_action, tar_next_state, tar_reward, tar_not_done = tar_replay_buffer.sample(batch_size)
 
         with torch.no_grad():
@@ -313,52 +355,49 @@ class NOMAD_V3(object):
                 intrinsic_reward = self.discount * potential_s_next - potential_s
                 tar_reward += self.intrinsic_reward_coef * intrinsic_reward
 
-            # Compute the target Q value for the exploratory policy
+            # Compute target Q value using EXPLORATION critic
             next_action_tar, log_prob_tar, _ = self.target_policy(tar_next_state, get_logprob=True)
-            q_t1, q_t2 = self.target_q_funcs(tar_next_state, next_action_tar)
+            q_t1, q_t2 = self.target_exploration_q_funcs(tar_next_state, next_action_tar)
             q_target = torch.min(q_t1, q_t2)
             value_target_tar = tar_reward + tar_not_done * self.discount * (q_target - self.alpha.detach() * log_prob_tar)
 
-        q1, q2 = self.q_funcs(tar_state, tar_action)
-        q_loss_tar = F.mse_loss(q1, value_target_tar) + F.mse_loss(q2, value_target_tar)
+        # Update EXPLORATION critic
+        q1, q2 = self.exploration_q_funcs(tar_state, tar_action)
+        q_loss_exploration = F.mse_loss(q1, value_target_tar) + F.mse_loss(q2, value_target_tar)
 
-        # This Q-loss is for the exploratory policy, so we optimize the shared Q-network here
-        self.q_optimizer.zero_grad()
-        q_loss_tar.backward()
-        self.q_optimizer.step()
+        self.exploration_q_optimizer.zero_grad()
+        q_loss_exploration.backward()
+        self.exploration_q_optimizer.step()
 
-        # Update exploratory policy
+        # Update exploratory policy using EXPLORATION critic
         if self.total_it % self.config.get('policy_freq', 2) == 0:
-            for p in self.q_funcs.parameters(): p.requires_grad = False
+            for p in self.exploration_q_funcs.parameters(): p.requires_grad = False
             pi_action_tar, log_prob_pi_tar, _ = self.target_policy(tar_state, get_logprob=True)
-            q1_pi, q2_pi = self.q_funcs(tar_state, pi_action_tar)
-            policy_loss_tar = (self.alpha.detach() * log_prob_pi_tar - torch.min(q1_pi, q2_pi)).mean()
+            q1_pi, q2_pi = self.exploration_q_funcs(tar_state, pi_action_tar)
+            policy_loss_exploration = (self.alpha.detach() * log_prob_pi_tar - torch.min(q1_pi, q2_pi)).mean()
             self.target_policy_optimizer.zero_grad()
-            policy_loss_tar.backward()
+            policy_loss_exploration.backward()
             self.target_policy_optimizer.step()
-            for p in self.q_funcs.parameters(): p.requires_grad = True
+            for p in self.exploration_q_funcs.parameters(): p.requires_grad = True
 
-        # --- 3. Source Policy Training Step (Task Policy) ---
-        # This step trains the source policy on both source (with DARC IS) and target (with Policy IS) data.
-
-        # 3a. Sample source and target data for the task policy
+        # --- 3. Task Policy Training Step ---
+        # Uses TASK CRITIC with extrinsic rewards and importance sampling
         src_state, src_action, src_next_state, src_reward, src_not_done = src_replay_buffer.sample(batch_size)
         tar_state_is, tar_action_is, tar_next_state_is, tar_reward_is, tar_not_done_is = tar_replay_buffer.sample(batch_size)
 
-        # 3b. Q-function update for task policy
         with torch.no_grad():
-            # Q-target for source data (using extrinsic reward)
+            # Q-target for source data using TASK critic
             next_action_src, log_prob_src, _ = self.policy(src_next_state, get_logprob=True)
             noise = (torch.randn_like(next_action_src) * self.temp).clamp(-self.policy_noise_clip, self.policy_noise_clip)
             noisy_next_action_src = (next_action_src + noise).clamp(-self.config['max_action'], self.config['max_action'])
-            q_t1_src, q_t2_src = self.target_q_funcs(src_next_state, noisy_next_action_src)
+            q_t1_src, q_t2_src = self.target_task_q_funcs(src_next_state, noisy_next_action_src)
             value_target_src = src_reward + src_not_done * self.discount * (torch.min(q_t1_src, q_t2_src) - self.alpha * log_prob_src)
 
-            # Q-target for target data (using extrinsic reward)
+            # Q-target for target data using TASK critic
             next_action_tar_is, log_prob_tar_is, _ = self.policy(tar_next_state_is, get_logprob=True)
             noise_is = (torch.randn_like(next_action_tar_is) * self.temp).clamp(-self.policy_noise_clip, self.policy_noise_clip)
             noisy_next_action_tar_is = (next_action_tar_is + noise_is).clamp(-self.config['max_action'], self.config['max_action'])
-            q_t1_tar_is, q_t2_tar_is = self.target_q_funcs(tar_next_state_is, noisy_next_action_tar_is)
+            q_t1_tar_is, q_t2_tar_is = self.target_task_q_funcs(tar_next_state_is, noisy_next_action_tar_is)
             value_target_tar_is = tar_reward_is + tar_not_done_is * self.discount * (torch.min(q_t1_tar_is, q_t2_tar_is) - self.alpha * log_prob_tar_is)
 
             # Importance Sampling Weights for Source Data (DARC weights)
@@ -376,46 +415,46 @@ class NOMAD_V3(object):
             is_weights_tar = torch.clamp(is_weights_tar, 1e-4, 1.0)
 
             if writer is not None and self.total_it % 1000 == 0:
-                writer.add_scalar('nomad_v2/is_weights_src_mean', is_weights_src.mean().item(), self.total_it)
-                writer.add_scalar('nomad_v2/is_weights_tar_mean', is_weights_tar.mean().item(), self.total_it)
-                writer.add_scalar('nomad_v2/action_noise_mean', noise.abs().mean().item(), self.total_it)
-                writer.add_scalar('nomad_v2/temperature', self.temp, self.total_it)
+                writer.add_scalar('nomad_separate/is_weights_src_mean', is_weights_src.mean().item(), self.total_it)
+                writer.add_scalar('nomad_separate/is_weights_tar_mean', is_weights_tar.mean().item(), self.total_it)
+                writer.add_scalar('nomad_separate/action_noise_mean', noise.abs().mean().item(), self.total_it)
+                writer.add_scalar('nomad_separate/temperature', self.temp, self.total_it)
+                writer.add_scalar('nomad_separate/exploration_q_loss', q_loss_exploration.item(), self.total_it)
 
-        # Weighted Q-Loss for source data
-        q1_src, q2_src = self.q_funcs(src_state, src_action)
+        # Update TASK critic
+        q1_src, q2_src = self.task_q_funcs(src_state, src_action)
         q_loss_src_unweighted = F.mse_loss(q1_src, value_target_src, reduction='none') + F.mse_loss(q2_src, value_target_src, reduction='none')
         q_loss_src = (q_loss_src_unweighted.squeeze(-1) * is_weights_src).mean()
 
-        # Weighted Q-Loss for target data
-        q1_tar_is, q2_tar_is = self.q_funcs(tar_state_is, tar_action_is)
+        q1_tar_is, q2_tar_is = self.task_q_funcs(tar_state_is, tar_action_is)
         q_loss_tar_is_unweighted = F.mse_loss(q1_tar_is, value_target_tar_is, reduction='none') + F.mse_loss(q2_tar_is, value_target_tar_is, reduction='none')
         q_loss_tar_is = (q_loss_tar_is_unweighted.squeeze(-1) * is_weights_tar).mean()
 
-        total_q_loss_task_policy = q_loss_src + q_loss_tar_is
-        self.q_optimizer.zero_grad()
-        total_q_loss_task_policy.backward()
-        self.q_optimizer.step()
+        total_q_loss_task = q_loss_src + q_loss_tar_is
+        self.task_q_optimizer.zero_grad()
+        total_q_loss_task.backward()
+        self.task_q_optimizer.step()
 
-        # 3c. Task policy and temperature update (delayed)
+        # Update task policy using TASK critic
         if self.total_it % self.config.get('policy_freq', 2) == 0:
-            self.temp *= (1 - self.temp_lr) # Decay temperature
-            for p in self.q_funcs.parameters(): p.requires_grad = False
+            self.temp *= (1 - self.temp_lr)  # Decay temperature
+            for p in self.task_q_funcs.parameters(): p.requires_grad = False
 
             # Policy loss from source batch (with DARC IS)
             pi_action_src, log_prob_pi_src, _ = self.policy(src_state, get_logprob=True)
-            q1_pi_src, q2_pi_src = self.q_funcs(src_state, pi_action_src)
+            q1_pi_src, q2_pi_src = self.task_q_funcs(src_state, pi_action_src)
             policy_loss_src_unweighted = (self.alpha * log_prob_pi_src - torch.min(q1_pi_src, q2_pi_src))
             policy_loss_src = (policy_loss_src_unweighted.squeeze(-1) * is_weights_src).mean()
 
             # Policy loss from target batch (with Policy IS)
             pi_action_tar_is, log_prob_pi_tar_is, _ = self.policy(tar_state_is, get_logprob=True)
-            q1_pi_tar_is, q2_pi_tar_is = self.q_funcs(tar_state_is, pi_action_tar_is)
+            q1_pi_tar_is, q2_pi_tar_is = self.task_q_funcs(tar_state_is, pi_action_tar_is)
             policy_loss_tar_unweighted = self.alpha * log_prob_pi_tar_is - torch.min(q1_pi_tar_is, q2_pi_tar_is)
             policy_loss_tar_is = (policy_loss_tar_unweighted.squeeze(-1) * is_weights_tar).mean()
 
             total_policy_loss = policy_loss_src + policy_loss_tar_is
 
-            # Temperature loss is calculated only on the source batch for stability
+            # Temperature loss
             temp_loss = -self.alpha * (log_prob_pi_src.detach() + self.target_entropy).mean()
 
             self.policy_optimizer.zero_grad()
@@ -427,17 +466,25 @@ class NOMAD_V3(object):
                 temp_loss.backward()
                 self.temp_optimizer.step()
 
-            for p in self.q_funcs.parameters(): p.requires_grad = True
+            for p in self.task_q_funcs.parameters(): p.requires_grad = True
 
+            # Update both target networks
             self.update_target()
+
+            if writer is not None:
+                writer.add_scalar('nomad_separate/task_q_loss', total_q_loss_task.item(), self.total_it)
+                writer.add_scalar('nomad_separate/task_policy_loss', total_policy_loss.item(), self.total_it)
+                writer.add_scalar('nomad_separate/exploration_policy_loss', policy_loss_exploration.item(), self.total_it)
 
     @property
     def alpha(self):
         return self.log_alpha.exp()
 
     def save(self, filename):
-        torch.save(self.q_funcs.state_dict(), filename + "_critic")
-        torch.save(self.q_optimizer.state_dict(), filename + "_critic_optimizer")
+        torch.save(self.exploration_q_funcs.state_dict(), filename + "_exploration_critic")
+        torch.save(self.exploration_q_optimizer.state_dict(), filename + "_exploration_critic_optimizer")
+        torch.save(self.task_q_funcs.state_dict(), filename + "_task_critic")
+        torch.save(self.task_q_optimizer.state_dict(), filename + "_task_critic_optimizer")
         torch.save(self.policy.state_dict(), filename + "_actor")
         torch.save(self.policy_optimizer.state_dict(), filename + "_actor_optimizer")
         torch.save(self.target_policy.state_dict(), filename + "_exploration_actor")
@@ -448,8 +495,10 @@ class NOMAD_V3(object):
         torch.save(self.dynamics_optimizer.state_dict(), filename + "_dynamics_optimizer")
 
     def load(self, filename):
-        self.q_funcs.load_state_dict(torch.load(filename + "_critic"))
-        self.q_optimizer.load_state_dict(torch.load(filename + "_critic_optimizer"))
+        self.exploration_q_funcs.load_state_dict(torch.load(filename + "_exploration_critic"))
+        self.exploration_q_optimizer.load_state_dict(torch.load(filename + "_exploration_critic_optimizer"))
+        self.task_q_funcs.load_state_dict(torch.load(filename + "_task_critic"))
+        self.task_q_optimizer.load_state_dict(torch.load(filename + "_task_critic_optimizer"))
         self.policy.load_state_dict(torch.load(filename + "_actor"))
         self.policy_optimizer.load_state_dict(torch.load(filename + "_actor_optimizer"))
         self.target_policy.load_state_dict(torch.load(filename + "_exploration_actor"))
