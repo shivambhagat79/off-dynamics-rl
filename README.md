@@ -142,6 +142,8 @@ We directly adopt offline source domain datasets from the popular [D4RL](https:/
 | **Antmaze medium/large maze**| 1, 2, 3, 4, 5, 6 | 
 | **Dexterous Manipulation**| easy, medium, hard |
 
+**Note**: It is reported that `hopepr-friction-0.1` task has a [bug](https://github.com/OffDynamicsRL/off-dynamics-rl/issues/8). Please do NOT use this task.
+
 ## Licences
 
 Our repository is licensed under the MIT licence. The adopted Gym environments and mujoco-py are also licensed under the MIT License. For the D4RL library (including the Antmaze domain and the Adroit domain, and offline datasets), all datasets are licensed under the Creative Commons Attribution 4.0 License (CC BY), and code is licensed under the Apache 2.0 License.
